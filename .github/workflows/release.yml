@@ -1,0 +1,137 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify release tag
+        run: |
+          test "$GITHUB_REF_TYPE" = tag
+          test "$GITHUB_REF_NAME" = "$(cat VERSION)"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Verify application
+        run: |
+          go vet ./...
+          go test -race ./...
+          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+          cd web
+          npm ci
+          npm run format:check
+          npm test
+          npm run build
+          cd ..
+          git diff --exit-code -- internal/ui/dist
+      - name: Reserve unpublished version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Creation is atomic and rejects existing releases (including drafts).
+          # A failed build leaves a draft: investigate before deleting/retrying.
+          gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "$GITHUB_REF_NAME" --notes "Release build in progress."
+
+  binaries:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build Linux binaries
+        run: |
+          mkdir -p release
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -ldflags="-s -w" -o ts-egress ./cmd/ts-egress
+            tar -czf "release/ts-egress-${GITHUB_REF_NAME}-linux-${arch}.tar.gz" ts-egress README.md LICENSE VERSION
+          done
+          cd release
+          sha256sum *.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-binaries
+          path: release/*
+          if-no-files-found: error
+
+  image:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ghcr.io/wanderson9/ts-egress:${{ github.ref_name }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/wanderson9/ts-egress
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+  publish:
+    needs: [binaries, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-binaries
+          path: release
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_DIGEST: ${{ needs.image.outputs.digest }}
+        run: |
+          cat > release-notes.md <<EOF
+          ts-egress ${GITHUB_REF_NAME}
+
+          Standalone Linux binaries include the administration UI. Download the archive for your architecture and verify it against SHA256SUMS.
+
+          Multi-architecture container (Linux amd64 and arm64):
+          \`ghcr.io/wanderson9/ts-egress:${GITHUB_REF_NAME}\`
+
+          Immutable image reference:
+          \`ghcr.io/wanderson9/ts-egress@${IMAGE_DIGEST}\`
+
+          See the README for loopback-only setup port publishing, persistent storage, and networking requirements.
+          EOF
+          gh release upload "$GITHUB_REF_NAME" release/*
+          gh release edit "$GITHUB_REF_NAME" --notes-file release-notes.md --draft=false
