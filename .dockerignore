@@ -1,0 +1,11 @@
+.git
+.gitignore
+AGENTS.md
+AGENT.md
+CLAUDE.md
+.opencode
+bin
+data
+*.test
+web/node_modules
+internal/ui/dist
