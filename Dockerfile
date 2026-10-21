@@ -15,7 +15,7 @@ COPY . .
 COPY --from=frontend /src/internal/ui/dist ./internal/ui/dist
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /ts-egress ./cmd/ts-egress
 
-FROM alpine:3.23
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates && addgroup -g 10001 egress && adduser -D -u 10001 -G egress egress && mkdir /data && chown egress:egress /data
 COPY --from=build /ts-egress /usr/local/bin/ts-egress
 USER 10001:10001
