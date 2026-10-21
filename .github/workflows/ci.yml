@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Verify prebuilt frontend is current
+        run: |
+          (cd web && npm ci && npm run build)
+          test -z "$(git diff -- internal/ui/dist)" || { echo "Embedded frontend assets are stale; run make frontend"; exit 1; }
+      - name: Verify Go and frontend
+        run: |
+          go vet ./...
+          go test -race ./...
+          cd web && npm run format:check && npm test
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build supplied container
+        run: docker compose build
+      - name: Verify Compose configuration
+        run: docker compose config --quiet
