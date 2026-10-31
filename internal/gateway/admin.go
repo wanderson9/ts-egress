@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"ts-egress/internal/ui"
 )
 
@@ -100,6 +101,10 @@ func (g *Gateway) AdminWithSetup(path, host, origin string, identify Identity, s
 	})
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
 		routes, revision := g.Configuration()
+		for i := range routes {
+			routes[i].BasicAuthPassword = ""
+			routes[i].BasicAuth = routes[i].BasicAuthUser != ""
+		}
 		health := map[string]ServiceHealth{}
 		if g.Health != nil {
 			health = g.Health.Snapshot(routes)
@@ -222,9 +227,14 @@ func (g *Gateway) AdminWithSetup(path, host, origin string, identify Identity, s
 			http.Error(w, "unexpected trailing data", 400)
 			return
 		}
-		if err := Validate(routes); err != nil {
-			http.Error(w, err.Error(), 400)
-			return
+		for i := range routes {
+			if routes[i].BasicAuthUser == "" {
+				continue
+			}
+			if strings.HasPrefix(routes[i].BasicAuthPassword, "bcrypt:") {
+				http.Error(w, "password verifier is not accepted from clients", 400)
+				return
+			}
 		}
 		revision, err := strconv.ParseUint(r.Header.Get("If-Match"), 10, 64)
 		if err != nil {
@@ -241,12 +251,41 @@ func (g *Gateway) AdminWithSetup(path, host, origin string, identify Identity, s
 			http.Error(w, "route revision exhausted", http.StatusConflict)
 			return
 		}
-		if err := Save(path, routes); err != nil {
+		// Merge only from the same snapshot that the revision protects.
+		oldRoutes := g.Routes()
+		for i := range routes {
+			if routes[i].BasicAuthUser != "" && routes[i].BasicAuthPassword == "" {
+				for _, old := range oldRoutes {
+					if old.Domain == routes[i].Domain && old.BasicAuthUser != "" && old.BasicAuthUser == routes[i].BasicAuthUser {
+						routes[i].BasicAuthPassword = old.BasicAuthPassword
+						break
+					}
+				}
+			}
+		}
+		for _, old := range oldRoutes {
+			for _, next := range routes {
+				if old.BasicAuthUser != "" && next.BasicAuthUser == "" && !next.BasicAuth && (old.Domain == next.Domain || !hasDomain(routes, old.Domain)) && r.Header.Get("X-Confirm-Auth-Removal") != "1" {
+					http.Error(w, "confirm removal of site authentication", 409)
+					return
+				}
+			}
+		}
+		if err := Validate(routes); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		storedRoutes, err := PersistedRoutes(routes)
+		if err != nil {
+			http.Error(w, "could not secure route credentials", 500)
+			return
+		}
+		if err := Save(path, storedRoutes); err != nil {
 			slog.Error("save routes", "error", err)
 			http.Error(w, "could not persist routes", 500)
 			return
 		}
-		g.replace(routes)
+		g.replace(storedRoutes)
 		slog.Info("routes updated", "actor", r.Context().Value(actorKey{}), "count", len(routes))
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -288,6 +327,15 @@ func (g *Gateway) AdminWithSetup(path, host, origin string, identify Identity, s
 func privateIdentityRequest(r *http.Request) bool {
 	a, ok := r.Context().Value(adminAccessKey{}).(adminAccess)
 	return ok && a.actor != ""
+}
+
+func hasDomain(routes []Route, domain string) bool {
+	for _, route := range routes {
+		if route.Domain == domain {
+			return true
+		}
+	}
+	return false
 }
 
 type actorKey struct{}

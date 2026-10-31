@@ -75,6 +75,7 @@ export function Confirm({
     <DialogTrigger
       isOpen={open}
       onOpenChange={(value) => {
+        if (busy && !value) return;
         setOpen(value);
         setError('');
       }}
@@ -82,7 +83,7 @@ export function Confirm({
       <Button className={destructive ? 'danger' : undefined} isDisabled={isDisabled}>
         {label}
       </Button>
-      <ModalOverlay isDismissable={!busy}>
+      <ModalOverlay isDismissable={!busy} isKeyboardDismissDisabled={busy}>
         <Modal>
           <Dialog role="alertdialog">
             <Heading slot="title">{title}</Heading>

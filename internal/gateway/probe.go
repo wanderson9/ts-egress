@@ -48,6 +48,7 @@ func (g *Gateway) checkBackends(ctx context.Context, client *http.Client) {
 				req, err := http.NewRequestWithContext(probeCtx, http.MethodHead, route.Upstream, nil)
 				v := BackendHealth{State: "Offline"}
 				if err == nil {
+					req.Host = route.Domain
 					req.Header.Set("User-Agent", "ts-egress-health/1")
 					var resp *http.Response
 					resp, err = client.Do(req)

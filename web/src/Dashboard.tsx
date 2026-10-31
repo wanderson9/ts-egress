@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { Button, Link } from 'react-aria-components';
 import { api, type Route, type Totals, type ServiceHealth } from './api';
 import { bytes, ClientDetails } from './Activity';
@@ -24,6 +24,16 @@ export function Dashboard() {
     [message, setMessage] = useState(''),
     [statusError, setStatusError] = useState('');
   const [revision, setRevision] = useState(0);
+  const originalRoutes = useRef<Route[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const savingRef = useRef(false);
+  const loadingRef = useRef(false);
+  const requestEpoch = useRef(0);
+  const [domainFilter, setDomainFilter] = useState('');
+  const visibleRoutes = routes.filter((route) =>
+    route.domain.includes(domainFilter.trim().toLowerCase()),
+  );
   const [expanded, setExpanded] = useState<string[]>([]),
     [editor, setEditor] = useState<{ route?: Route }>(),
     [certificateDomain, setCertificateDomain] = useState<string>(),
@@ -35,15 +45,28 @@ export function Dashboard() {
     setStatusError('');
   }
   async function refreshStatus() {
-    accept(await api<Status>('/api/status'));
+    const epoch = requestEpoch.current;
+    const data = await api<Status>('/api/status');
+    if (epoch === requestEpoch.current) accept(data);
   }
   async function load() {
-    const data = await api<Status>('/api/status');
-    accept(data);
-    setRevision(data.revision);
-    setRoutes(data.routes);
-    setDirty(false);
-    setLoaded(true);
+    if (savingRef.current || loadingRef.current) return;
+    loadingRef.current = true;
+    setLoading(true);
+    const epoch = ++requestEpoch.current;
+    try {
+      const data = await api<Status>('/api/status');
+      if (epoch !== requestEpoch.current || savingRef.current) return;
+      accept(data);
+      setRevision(data.revision);
+      setRoutes(data.routes);
+      originalRoutes.current = data.routes;
+      setDirty(false);
+      setLoaded(true);
+    } finally {
+      loadingRef.current = false;
+      setLoading(false);
+    }
   }
   async function confirmLoad() {
     await load();
@@ -52,18 +75,20 @@ export function Dashboard() {
     let active = true,
       timer: ReturnType<typeof setTimeout>;
     async function poll() {
+      const epoch = requestEpoch.current;
       try {
         const data = await api<Status>('/api/status');
-        if (active) {
+        if (active && epoch === requestEpoch.current) {
           accept(data);
           setLoaded(true);
-          if (!dirty) {
+          if (!dirty && !savingRef.current && !loadingRef.current) {
             setRoutes(data.routes);
+            originalRoutes.current = data.routes;
             setRevision(data.revision);
           }
         }
       } catch (e) {
-        if (active) setStatusError((e as Error).message);
+        if (active && epoch === requestEpoch.current) setStatusError((e as Error).message);
       }
       if (active) timer = setTimeout(poll, 5000);
     }
@@ -84,13 +109,40 @@ export function Dashboard() {
     return () => window.removeEventListener('beforeunload', listener);
   }, [dirty]);
   async function save() {
+    if (savingRef.current || loadingRef.current) return;
+    savingRef.current = true;
+    requestEpoch.current++;
+    setSaving(true);
+    let persisted = false;
     try {
-      await api('/api/routes', 'PUT', routes, { 'If-Match': String(revision) });
-      setHealth({});
+      await api('/api/routes', 'PUT', routes, {
+        'If-Match': String(revision),
+        ...(originalRoutes.current.some(
+          (old) =>
+            old.basicAuth && !routes.some((next) => next.domain === old.domain && next.basicAuth),
+        )
+          ? { 'X-Confirm-Auth-Removal': '1' }
+          : {}),
+      });
+      persisted = true;
+      const data = await api<Status>('/api/status');
+      accept(data);
+      setRevision(data.revision);
+      setRoutes(data.routes);
+      originalRoutes.current = data.routes;
       setDirty(false);
       setMessage('Changes saved.');
     } catch (e) {
+      if (persisted) {
+        throw new Error(
+          `Changes were saved, but status could not be refreshed. Reload before saving again. ${(e as Error).message}`,
+        );
+      }
       throw e;
+    } finally {
+      requestEpoch.current++;
+      savingRef.current = false;
+      setSaving(false);
     }
   }
   return (
@@ -108,12 +160,18 @@ export function Dashboard() {
         <div className="actions">
           {dirty && <span>Unsaved changes</span>}
           {dirty ? (
-            <Confirm label="Reload" title="Discard unsaved changes?" onConfirm={confirmLoad}>
+            <Confirm
+              label="Reload"
+              title="Discard unsaved changes?"
+              isDisabled={saving || loading}
+              onConfirm={confirmLoad}
+            >
               Your unsaved edits will be discarded.
             </Confirm>
           ) : (
             <Button
               className="secondary"
+              isDisabled={saving || loading}
               onPress={() => {
                 void load().catch((e) => setStatusError(e.message));
               }}
@@ -121,17 +179,22 @@ export function Dashboard() {
               Refresh
             </Button>
           )}
-          <Button isDisabled={!loaded} onPress={() => setEditor({})}>
+          <Button isDisabled={!loaded || saving || loading} onPress={() => setEditor({})}>
             Add service
           </Button>
           <Confirm
             label="Save changes"
             title="Apply service changes?"
-            isDisabled={!dirty}
+            isDisabled={!dirty || saving || loading}
             onConfirm={save}
           >
             Enabled services will be public. Removed or disabled services stop accepting new proxied
             requests; existing connections may continue.
+            {originalRoutes.current.some(
+              (old) =>
+                old.basicAuth &&
+                !routes.some((route) => route.domain === old.domain && route.basicAuth),
+            ) && ' Removing HTTP Basic authentication exposes that service to the public.'}
           </Confirm>
         </div>
       </div>
@@ -141,6 +204,15 @@ export function Dashboard() {
         </p>
       )}
       <section className="panel">
+        <label className="native-field">
+          Filter domains{' '}
+          <input
+            type="search"
+            value={domainFilter}
+            onChange={(e) => setDomainFilter(e.target.value)}
+          />
+        </label>
+        <p className="upstream">Traffic: last 24 hours; resets on restart.</p>
         <div className="table-wrap">
           <table className="site-table" aria-label="Service routes">
             <thead>
@@ -163,7 +235,7 @@ export function Dashboard() {
               </tr>
             </thead>
             <tbody>
-              {routes.map((route) => {
+              {visibleRoutes.map((route) => {
                 const open = expanded.includes(route.domain),
                   total = sites[route.domain],
                   state = dirty ? undefined : health[route.domain],
@@ -206,6 +278,7 @@ export function Dashboard() {
                         <Check
                           aria-label={`Enable ${route.domain}`}
                           isSelected={route.enabled}
+                          isDisabled={saving || loading}
                           onChange={(enabled) => {
                             setRoutes((prev) =>
                               prev.map((r) => (r.domain === route.domain ? { ...r, enabled } : r)),
@@ -223,24 +296,28 @@ export function Dashboard() {
                         </span>
                       </td>
                       <td>
-                        {cert?.attempt === 'Failed' ||
-                        cert?.state === 'Failed' ||
-                        cert?.state === 'Error' ? (
+                        {cert ? (
                           <Button
-                            className="status-button error"
-                            aria-label={`Certificate failed for ${route.domain}`}
+                            className={`status-button ${['Expired', 'Invalid', 'Failed', 'Error', 'Not yet valid'].includes(cert.state) ? 'error' : ''}`}
+                            aria-label={`Certificate ${cert.attempt === 'Failed' || cert.state === 'Failed' || cert.state === 'Error' ? 'failed' : cert.state.toLowerCase()} for ${route.domain}`}
                             onPress={() => setCertificateDomain(route.domain)}
                           >
-                            Failed
+                            {cert.attempt === 'Issuing'
+                              ? 'Issuing'
+                              : cert.attempt === 'Failed' ||
+                                  cert.state === 'Error' ||
+                                  cert.state === 'Failed'
+                                ? 'Failed'
+                                : cert.state}
                           </Button>
                         ) : (
-                          <span
-                            className={
-                              ['Expired', 'Invalid'].includes(cert?.state ?? '') ? 'error' : ''
-                            }
+                          <Button
+                            className="status-button"
+                            aria-label={`Certificate unknown for ${route.domain}`}
+                            onPress={() => setCertificateDomain(route.domain)}
                           >
-                            {cert?.state ?? 'Unknown'}
-                          </span>
+                            Unknown
+                          </Button>
                         )}
                         {cert?.state === 'Not issued' && cert.detail === 'Waiting on traffic' && (
                           <small className="upstream">Waiting on traffic</small>
@@ -260,12 +337,14 @@ export function Dashboard() {
                           <Button
                             className="secondary"
                             aria-label={`Edit ${route.domain}`}
+                            isDisabled={saving || loading}
                             onPress={() => setEditor({ route })}
                           >
                             Edit
                           </Button>
                           <Button
                             className="secondary"
+                            isDisabled={saving || loading}
                             aria-label={`Remove ${route.domain}`}
                             onPress={() => {
                               setRoutes((prev) => prev.filter((r) => r.domain !== route.domain));
@@ -298,6 +377,9 @@ export function Dashboard() {
               })}
             </tbody>
           </table>
+          {loaded && routes.length > 0 && !visibleRoutes.length && (
+            <p className="padded">No matching services.</p>
+          )}
           {!routes.length && (
             <p className="padded">{loaded ? 'No services configured.' : 'Loading services…'}</p>
           )}
@@ -307,8 +389,11 @@ export function Dashboard() {
       {editor && (
         <ServiceEditor
           route={editor.route}
-          onClose={() => setEditor(undefined)}
+          onClose={() => {
+            if (!saving && !loading) setEditor(undefined);
+          }}
           onSave={(route) => {
+            if (savingRef.current || loading) return;
             if (
               routes.some((r) => r.domain === route.domain && r.domain !== editor.route?.domain)
             ) {

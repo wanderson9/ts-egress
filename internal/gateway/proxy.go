@@ -2,8 +2,11 @@ package gateway
 
 import (
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
+	"encoding/base64"
 	"errors"
+	"golang.org/x/crypto/bcrypt"
 	"io"
 	"log/slog"
 	"net"
@@ -20,24 +23,28 @@ import (
 type table struct {
 	routes   []Route
 	handlers map[string]http.Handler
+	auth     map[string]authCredential
 	revision uint64
 }
+type authCredential struct{ user, password string }
 type Gateway struct {
-	configMu         sync.Mutex
-	live             atomic.Pointer[table]
-	transport        *http.Transport
-	upgradeTransport *http.Transport
-	buffers          pool
-	Requests         atomic.Uint64
-	Failures         atomic.Uint64
-	Activity         Activity
-	Geo              *Geo
-	Health           *Health
-	RetryCertificate func(context.Context, string) (*tls.Certificate, error)
-	Connection       func(context.Context) map[string]any
-	Admission        *Admission
-	RetryContext     context.Context
-	Blocks           *Blocks
+	configMu            sync.Mutex
+	live                atomic.Pointer[table]
+	transport           *http.Transport
+	upgradeTransport    *http.Transport
+	upstreamBodyTimeout time.Duration
+	buffers             pool
+	Requests            atomic.Uint64
+	Failures            atomic.Uint64
+	Activity            Activity
+	Geo                 *Geo
+	Health              *Health
+	RetryCertificate    func(context.Context, string) (*tls.Certificate, error)
+	Connection          func(context.Context) map[string]any
+	Admission           *Admission
+	RetryContext        context.Context
+	Blocks              *Blocks
+	authSlots           chan struct{}
 }
 
 func (g *Gateway) EnableGeo(enabled bool) {
@@ -119,7 +126,7 @@ func New(dial func(context.Context, string, string) (net.Conn, error)) *Gateway 
 		}
 		return t
 	}
-	g := &Gateway{transport: transport(true), upgradeTransport: transport(false)}
+	g := &Gateway{transport: transport(true), upgradeTransport: transport(false), upstreamBodyTimeout: upstreamBodyIdleTimeout, authSlots: make(chan struct{}, 4)}
 	g.RetryContext = context.Background()
 	g.Replace(nil)
 	return g
@@ -164,18 +171,23 @@ func (g *Gateway) replace(routes []Route) {
 	if previous := g.live.Load(); previous != nil {
 		revision = previous.revision + 1
 	}
-	t := &table{routes: append([]Route{}, routes...), handlers: make(map[string]http.Handler), revision: revision}
+	t := &table{routes: append([]Route{}, routes...), handlers: make(map[string]http.Handler), auth: make(map[string]authCredential), revision: revision}
 	for _, r := range routes {
+		if r.BasicAuthUser != "" {
+			t.auth[r.Domain] = authCredential{r.BasicAuthUser, r.BasicAuthPassword}
+		}
 		if !r.Enabled {
 			continue
 		}
 		target, _ := url.Parse(r.Upstream)
 		domain := r.Domain
-		t.handlers[r.Domain] = &httputil.ReverseProxy{
-			Transport: upstreamTransport{g.transport, g.upgradeTransport}, BufferPool: &g.buffers,
+		var proxy http.Handler = &httputil.ReverseProxy{
+			Transport: upstreamTimeoutTransport{base: upstreamTransport{g.transport, g.upgradeTransport}, timeout: g.upstreamBodyTimeout}, BufferPool: &g.buffers,
 			Rewrite: func(p *httputil.ProxyRequest) {
 				ip := clientIP(p.In)
-				p.Out = p.Out.WithContext(context.WithValue(p.Out.Context(), activityIPKey{}, ip))
+				ctx := context.WithValue(p.Out.Context(), activityIPKey{}, ip)
+				ctx = context.WithValue(ctx, downstreamContextKey{}, p.In.Context())
+				p.Out = p.Out.WithContext(ctx)
 				if p.Out.Body != nil && p.Out.Body != http.NoBody {
 					p.Out.Body = &measuredBody{ReadCloser: p.Out.Body, count: func(n int) { g.Activity.record(domain, ip, Totals{Received: uint64(n)}) }}
 				}
@@ -204,9 +216,24 @@ func (g *Gateway) replace(routes []Route) {
 				if resp.StatusCode >= 500 {
 					g.Activity.record(domain, ip, Totals{Errors: 1})
 				}
-				body := &measuredBody{ReadCloser: resp.Body, count: func(n int) { g.Activity.record(domain, ip, Totals{Sent: uint64(n)}) }}
+				body := &observedUpstreamBody{measuredBody: measuredBody{ReadCloser: resp.Body, count: func(n int) { g.Activity.record(domain, ip, Totals{Sent: uint64(n)}) }}, failed: func(err error) {
+					// A downstream disconnect cancels the request context and is not
+					// evidence of an upstream failure.
+					downstream := resp.Request.Context().Value(downstreamContextKey{}).(context.Context)
+					if downstream == nil || downstream.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) && !isUpstreamBodyTimeout(err) {
+						return
+					}
+					g.Failures.Add(1)
+					if resp.StatusCode < 500 {
+						g.Activity.record(domain, ip, Totals{Errors: 1})
+					}
+					if g.Health != nil {
+						g.Health.ResponseForUpstream(domain, target.String(), err.Error())
+					}
+					slog.Warn("upstream response body failed", "domain", domain, "upstream", target.String(), "status", resp.StatusCode, "error", err)
+				}}
 				if rw, ok := resp.Body.(io.ReadWriteCloser); ok {
-					resp.Body = &measuredDuplex{measuredBody: body, writer: rw, sent: func(n int) { g.Activity.record(domain, ip, Totals{Received: uint64(n)}) }}
+					resp.Body = &observedDuplex{measuredDuplex: measuredDuplex{measuredBody: &body.measuredBody, writer: rw, sent: func(n int) { g.Activity.record(domain, ip, Totals{Received: uint64(n)}) }}, observed: body}
 				} else {
 					resp.Body = body
 				}
@@ -222,6 +249,7 @@ func (g *Gateway) replace(routes []Route) {
 				ErrorPage(w, r, proxyErrorStatus(err))
 			},
 		}
+		t.handlers[r.Domain] = proxy
 	}
 	g.live.Store(t)
 	g.CloseIdleConnections()
@@ -261,12 +289,13 @@ func hostname(host string) string {
 	return strings.ToLower(host)
 }
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	snapshot := g.live.Load()
 	host := hostname(r.Host)
 	if r.TLS != nil && !strings.EqualFold(r.TLS.ServerName, host) {
 		ErrorPage(w, r, http.StatusMisdirectedRequest)
 		return
 	}
-	h, ok := g.live.Load().handlers[host]
+	h, ok := snapshot.handlers[host]
 	if !ok {
 		ErrorPage(w, r, http.StatusNotFound)
 		return
@@ -275,12 +304,46 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ErrorPage(w, r, http.StatusForbidden)
 		return
 	}
+	if credential, required := snapshot.auth[host]; required {
+		if r.TLS == nil {
+			http.Error(w, "HTTPS required", http.StatusUpgradeRequired)
+			return
+		}
+		user, password, ok := r.BasicAuth()
+		if len(password) > 72 || !ok || subtle.ConstantTimeCompare([]byte(user), []byte(credential.user)) != 1 {
+			w.Header().Set("WWW-Authenticate", `Basic realm="`+host+`", charset="UTF-8`)
+			http.Error(w, "authentication required", http.StatusUnauthorized)
+			return
+		}
+		select {
+		case g.authSlots <- struct{}{}:
+		default:
+			http.Error(w, "authentication service busy", http.StatusServiceUnavailable)
+			return
+		}
+		valid := false
+		if strings.HasPrefix(credential.password, "bcrypt:") {
+			hash, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(credential.password, "bcrypt:"))
+			valid = err == nil && bcrypt.CompareHashAndPassword(hash, []byte(password)) == nil
+		} else {
+			valid = subtle.ConstantTimeCompare([]byte(password), []byte(credential.password)) == 1
+		}
+		<-g.authSlots
+		if !valid {
+			w.Header().Set("WWW-Authenticate", `Basic realm="`+host+`", charset="UTF-8"`)
+			http.Error(w, "authentication required", http.StatusUnauthorized)
+			return
+		}
+		r = r.Clone(r.Context())
+		r.Header.Del("Authorization")
+	}
 	g.Requests.Add(1)
 	g.Activity.record(host, clientIP(r), Totals{Requests: 1})
 	h.ServeHTTP(w, r)
 }
 
 type activityIPKey struct{}
+type downstreamContextKey struct{}
 
 func clientIP(r *http.Request) netip.Addr {
 	if ip, ok := r.Context().Value(activityIPKey{}).(netip.Addr); ok {

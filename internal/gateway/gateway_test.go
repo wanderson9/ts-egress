@@ -19,17 +19,17 @@ import (
 
 func TestValidate(t *testing.T) {
 	for _, upstream := range []string{"http://server:3000", "https://server.tail.ts.net", "http://100.100.1.2:80", "http://[fd7a:115c:a1e0::1]:8080"} {
-		if err := Validate([]Route{{"app.example.com", upstream, true}}); err != nil {
+		if err := Validate([]Route{{"app.example.com", upstream, true, "", "", false}}); err != nil {
 			t.Errorf("%s: %v", upstream, err)
 		}
 	}
 	for _, upstream := range []string{"http://127.0.0.1", "http://169.254.169.254", "http://[::1]", "http://8.8.8.8", "file:///etc/passwd", "http://user:pass@server", "http://server/path", "http://server:99999", "http://server?q=1"} {
-		if Validate([]Route{{"app.example.com", upstream, true}}) == nil {
+		if Validate([]Route{{"app.example.com", upstream, true, "", "", false}}) == nil {
 			t.Errorf("accepted unsafe upstream %s", upstream)
 		}
 	}
 	for _, domain := range []string{"localhost", "*.example.com", "UPPER.example.com", "app.example.com:443", "https://app.example.com", "a..com"} {
-		if Validate([]Route{{domain, "http://server", true}}) == nil {
+		if Validate([]Route{{domain, "http://server", true, "", "", false}}) == nil {
 			t.Errorf("accepted %s", domain)
 		}
 	}
@@ -53,7 +53,7 @@ func TestProxy(t *testing.T) {
 	}))
 	defer up.Close()
 	g := New((&net.Dialer{}).DialContext)
-	g.Replace([]Route{{"app.example.com", up.URL, true}})
+	g.Replace([]Route{{"app.example.com", up.URL, true, "", "", false}})
 	r := httptest.NewRequest("GET", "https://app.example.com/hello?q=1", nil)
 	r.TLS = &tls.ConnectionState{ServerName: "app.example.com"}
 	r.Header.Set("Tailscale-User-Login", "admin@example.com")
@@ -87,7 +87,7 @@ func TestProxyPreservesPublicHostForRedirects(t *testing.T) {
 	}))
 	defer up.Close()
 	g := New((&net.Dialer{}).DialContext)
-	g.Replace([]Route{{"contour.egress.wa9.us", up.URL, true}})
+	g.Replace([]Route{{"contour.egress.wa9.us", up.URL, true, "", "", false}})
 	r := httptest.NewRequest("GET", "https://contour.egress.wa9.us/", nil)
 	r.TLS = &tls.ConnectionState{ServerName: "contour.egress.wa9.us"}
 	r.Header.Set("X-Forwarded-Host", "spoofed.example")
@@ -101,7 +101,7 @@ func TestProxyPreservesPublicHostForRedirects(t *testing.T) {
 
 func TestPersistence(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "routes.json")
-	routes := []Route{{"app.example.com", "http://server:3000", true}}
+	routes := []Route{{"app.example.com", "http://server:3000", true, "", "", false}}
 	if err := Save(p, routes); err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestPersistence(t *testing.T) {
 	if st.Mode().Perm() != 0600 {
 		t.Fatal("configuration not private")
 	}
-	if err := Save(p, []Route{{"bad", "http://server", true}}); err == nil {
+	if err := Save(p, []Route{{"bad", "http://server", true, "", "", false}}); err == nil {
 		t.Fatal("saved invalid configuration")
 	}
 	loaded, _ = Load(p)
@@ -197,7 +197,7 @@ func TestConcurrentRouting(t *testing.T) {
 	for range 8 {
 		wg.Go(func() {
 			for range 100 {
-				g.Replace([]Route{{"app.example.com", "http://server", false}})
+				g.Replace([]Route{{"app.example.com", "http://server", false, "", "", false}})
 				g.Routes()
 				g.Allows(context.Background(), "app.example.com")
 				g.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "http://unknown.example.com/", nil))
@@ -232,7 +232,7 @@ func TestRouteSaveRejectsStaleRevision(t *testing.T) {
 	g := New((&net.Dialer{}).DialContext)
 	host := "egress.tail.ts.net"
 	path := filepath.Join(t.TempDir(), "routes.json")
-	routes := []Route{{"app.example.com", "http://server:3000", true}}
+	routes := []Route{{"app.example.com", "http://server:3000", true, "", "", false}}
 	g.Replace(routes)
 	h := g.Admin(path, host, func(context.Context, string) (string, error) { return "admin", nil })
 	request := func(revision string, routes []Route) int {
@@ -260,7 +260,7 @@ func TestRouteSaveRejectsStaleRevision(t *testing.T) {
 
 func BenchmarkRouteLookup(b *testing.B) {
 	g := New((&net.Dialer{}).DialContext)
-	g.Replace([]Route{{"app.example.com", "http://server", true}})
+	g.Replace([]Route{{"app.example.com", "http://server", true, "", "", false}})
 	for b.Loop() {
 		_ = g.Allows(context.Background(), "app.example.com")
 	}

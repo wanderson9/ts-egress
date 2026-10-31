@@ -86,7 +86,7 @@ func TestActivityUpgradeOverHTTPSUpstream(t *testing.T) {
 				}
 				tr.TLSClientConfig.RootCAs = pool
 			}
-			g.Replace([]Route{{"app.example.com", up.URL, true}})
+			g.Replace([]Route{{"app.example.com", up.URL, true, "", "", false}})
 			public := httptest.NewServer(g)
 			defer public.Close()
 			conn, err := net.DialTimeout("tcp", strings.TrimPrefix(public.URL, "http://"), time.Second)
@@ -127,7 +127,7 @@ func TestActivityUpgrade(t *testing.T) {
 	}))
 	defer up.Close()
 	g := New((&net.Dialer{}).DialContext)
-	g.Replace([]Route{{"app.example.com", up.URL, true}})
+	g.Replace([]Route{{"app.example.com", up.URL, true, "", "", false}})
 	public := httptest.NewServer(g)
 	defer public.Close()
 	conn, err := net.DialTimeout("tcp", strings.TrimPrefix(public.URL, "http://"), time.Second)
@@ -170,7 +170,7 @@ func TestActivityProxy(t *testing.T) {
 	}))
 	defer up.Close()
 	g := New((&net.Dialer{}).DialContext)
-	routes := []Route{{"app.example.com", up.URL, true}}
+	routes := []Route{{"app.example.com", up.URL, true, "", "", false}}
 	g.Replace(routes)
 	r := httptest.NewRequest("POST", "http://app.example.com/", strings.NewReader("upload"))
 	r.RemoteAddr = "203.0.113.4:1234"
@@ -411,7 +411,7 @@ func TestActivityRetainedMemory(t *testing.T) {
 }
 func TestActivityAPI(t *testing.T) {
 	g := New((&net.Dialer{}).DialContext)
-	g.Replace([]Route{{"app.example.com", "http://server", true}})
+	g.Replace([]Route{{"app.example.com", "http://server", true, "", "", false}})
 	g.Activity.record("app.example.com", netip.MustParseAddr("8.8.8.8"), Totals{Requests: 1})
 	h := g.Admin("unused", "egress.tail.ts.net", func(context.Context, string) (string, error) { return "admin", nil })
 	w := httptest.NewRecorder()

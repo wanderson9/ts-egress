@@ -49,6 +49,9 @@ export function ServiceEditor({
       original?.port || (original?.protocol === 'https:' ? '443' : route ? '80' : '3000'),
     ),
     [protocol, setProtocol] = useState(original?.protocol === 'https:' ? 'https' : 'http');
+  const [domainError, setDomainError] = useState('');
+  const [authUser, setAuthUser] = useState(route?.basicAuthUser ?? ''),
+    [authPassword, setAuthPassword] = useState('');
   const [peers, setPeers] = useState<SetupStatus['tailnet']['peers']>([]),
     [loading, setLoading] = useState(true),
     [error, setError] = useState('');
@@ -81,12 +84,23 @@ export function ServiceEditor({
       <Form
         onSubmit={(e) => {
           e.preventDefault();
+          const normalizedDomain = domain.trim().toLowerCase();
+          if (!validPublicDomain(normalizedDomain)) {
+            setDomainError(
+              'Enter a lowercase public DNS name with at least one dot (not an IP address).',
+            );
+            return;
+          }
+          setDomainError('');
           if (!host || !/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535) return;
           const address = host.includes(':') ? `[${host}]` : host;
           onSave({
-            domain: domain.trim().toLowerCase(),
+            domain: normalizedDomain,
             upstream: `${protocol}://${address}:${port}`,
             enabled: route?.enabled ?? true,
+            basicAuthUser: authUser.trim() || undefined,
+            basicAuthPassword: authPassword || undefined,
+            basicAuth: !!authUser.trim(),
           });
         }}
       >
@@ -94,9 +108,17 @@ export function ServiceEditor({
           label="Domain"
           isRequired
           value={domain}
-          onChange={setDomain}
           placeholder="app.example.com"
+          onChange={(value) => {
+            setDomain(value);
+            setDomainError('');
+          }}
         />
+        {domainError && (
+          <p className="error" role="alert">
+            {domainError}
+          </p>
+        )}
         <label className="native-field">
           Host
           <select required value={host} onChange={(e) => setHost(e.target.value)}>
@@ -117,6 +139,16 @@ export function ServiceEditor({
             {loading ? 'Loading…' : 'Refresh hosts'}
           </Button>
         </div>
+        <fieldset>
+          <legend>HTTP Basic authentication</legend>
+          <Field label="Username" value={authUser} onChange={setAuthUser} />
+          <Field
+            label={route?.basicAuth ? 'New password (leave blank to keep)' : 'Password'}
+            type="password"
+            value={authPassword}
+            onChange={setAuthPassword}
+          />
+        </fieldset>
         <div className="endpoint-fields">
           <Field
             label="Port"
@@ -147,6 +179,18 @@ export function ServiceEditor({
     </Popup>
   );
 }
+export function validPublicDomain(value: string): boolean {
+  if (value.length > 253 || !value.includes('.') || value !== value.toLowerCase()) return false;
+  const ipv4 = value.split('.');
+  if (
+    ipv4.length === 4 &&
+    ipv4.every((part) => /^(0|[1-9]\d{0,2})$/.test(part) && Number(part) <= 255)
+  )
+    return false;
+  return value
+    .split('.')
+    .every((label) => label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label));
+}
 export function CertificateDialog({
   domain,
   certificate,
@@ -165,6 +209,18 @@ export function CertificateDialog({
   return (
     <Popup title={`Certificate: ${domain}`} onClose={onClose}>
       <p>{certificate?.state ?? 'Unknown'}</p>
+      {certificate?.attempt === 'Failed' && (
+        <p>Review the failure details, then retry when the cause is resolved.</p>
+      )}
+      {certificate?.state === 'Expired' && (
+        <p>Check DNS and gateway reachability, then retry certificate issuance when available.</p>
+      )}
+      {certificate?.state === 'Invalid' && (
+        <p>Check the domain’s DNS records and gateway certificate configuration.</p>
+      )}
+      {certificate?.state === 'Not yet valid' && (
+        <p>Check the gateway clock and certificate validity dates.</p>
+      )}
       {certificate?.attempt && <p>Last certificate attempt: {certificate.attempt}</p>}
       {certificate?.detail && <pre className="error-detail">{certificate.detail}</pre>}
       {error && (
@@ -176,7 +232,9 @@ export function CertificateDialog({
         <Button className="secondary" onPress={onClose}>
           Close
         </Button>
-        {certificate?.state !== 'Valid' && (
+        {(certificate?.attempt === 'Failed' ||
+          certificate?.state === 'Failed' ||
+          certificate?.state === 'Error') && (
           <Button
             isDisabled={busy || !enabled || certificate?.attempt === 'Issuing'}
             onPress={async () => {

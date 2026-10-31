@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Button, Form, Link } from 'react-aria-components';
 import { api, type SetupStatus } from './api';
 import { Check, Confirm, Field, Notice, Status } from './components';
@@ -9,6 +9,7 @@ export function Settings() {
     document.title = 'Settings · ts-egress';
   }, []);
   const [data, setData] = useState<SetupStatus>();
+  const [savedSettings, setSavedSettings] = useState<SetupStatus['settings']>();
   const [admins, setAdmins] = useState('');
   const [geo, setGeo] = useState<boolean>();
   const [blocks, setBlocks] = useState<string[]>();
@@ -18,8 +19,10 @@ export function Settings() {
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
   const [loggedOut, setLoggedOut] = useState(false);
   const [confirmLockout, setConfirmLockout] = useState(false);
+  const [confirmOpenAccess, setConfirmOpenAccess] = useState(false);
   const [accessLost, setAccessLost] = useState(false);
   const nextAdmins = admins
     .split(',')
@@ -27,14 +30,30 @@ export function Settings() {
     .filter(Boolean);
   const removesAccess =
     !!data?.identity && nextAdmins.length > 0 && !nextAdmins.includes(data.identity);
+  const savedAdmins = data?.settings.admins ?? [];
+  const changesToOpenAccess = savedAdmins.length > 0 && nextAdmins.length === 0;
+  const normalizedAdmins = (values: string[]) =>
+    values
+      .map((value) => value.trim())
+      .filter(Boolean)
+      .join(',');
+  const dirty =
+    !!data &&
+    !!savedSettings &&
+    (normalizedAdmins(nextAdmins) !== normalizedAdmins(savedSettings.admins ?? []) ||
+      data.settings.email !== savedSettings.email ||
+      data.settings.acceptTerms !== savedSettings.acceptTerms);
   async function saveSettings(confirmed = false) {
-    if (!data) return;
-    if (removesAccess && !confirmed) {
-      setConfirmLockout(true);
+    if (!data || busyRef.current) return;
+    if ((removesAccess || changesToOpenAccess) && !confirmed) {
+      if (removesAccess) setConfirmLockout(true);
+      else setConfirmOpenAccess(true);
       return;
     }
+    busyRef.current = true;
     setBusy(true);
     setError('');
+    let persisted = false;
     try {
       await api(
         '/api/setup/settings',
@@ -42,22 +61,34 @@ export function Settings() {
         { ...data.settings, admins: nextAdmins },
         {
           'If-Match': String(data.settingsRevision),
-          ...(confirmed ? { 'X-Confirm-Admin-Lockout': '1' } : {}),
+          ...(confirmed && changesToOpenAccess ? { 'X-Confirm-Admin-Change': '1' } : {}),
+          ...(confirmed && removesAccess ? { 'X-Confirm-Admin-Lockout': '1' } : {}),
         },
       );
+      persisted = true;
       setConfirmLockout(false);
+      setConfirmOpenAccess(false);
       if (removesAccess) {
         setAccessLost(true);
+        setSavedSettings({ ...data.settings, admins: nextAdmins });
+        setData({ ...data, settings: { ...data.settings, admins: nextAdmins } });
+        setAdmins(nextAdmins.join(','));
         setMessage('Settings saved. Your administrator access was removed.');
         return;
       }
       const next = await api<SetupStatus>('/api/setup/status');
       setData(next);
+      setSavedSettings(next.settings);
       setAdmins((next.settings.admins ?? []).join(','));
       setMessage('Settings saved.');
     } catch (e) {
-      setError((e as Error).message);
+      setError(
+        persisted
+          ? `Settings were saved, but status could not be refreshed. Reload before saving again. ${(e as Error).message}`
+          : (e as Error).message,
+      );
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   }
@@ -78,6 +109,7 @@ export function Settings() {
             if (!active) return;
             if (!initialized) {
               setData(value);
+              setSavedSettings(value.settings);
               setAdmins((value.settings.admins ?? []).join(','));
               initialized = true;
             } else {
@@ -109,6 +141,16 @@ export function Settings() {
       clearTimeout(timer);
     };
   }, [accessLost, loggedOut]);
+  useEffect(() => {
+    const listener = (event: BeforeUnloadEvent) => {
+      if (dirty) {
+        event.preventDefault();
+        event.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', listener);
+    return () => window.removeEventListener('beforeunload', listener);
+  }, [dirty]);
   return (
     <>
       <header>
@@ -147,6 +189,7 @@ export function Settings() {
                 label="Tailscale administrators"
                 description="Comma-separated login names. Empty allows any untagged user on your tailnet."
                 value={admins}
+                isDisabled={busy}
                 onChange={setAdmins}
               />
               <Field
@@ -154,12 +197,13 @@ export function Settings() {
                 description="Used only for initial registration. Existing account contacts must be updated with the certificate authority."
                 type="email"
                 isRequired
-                isDisabled={data.settings.connect}
+                isDisabled={busy || data.settings.connect}
                 value={data.settings.email}
                 onChange={(email) => setData({ ...data, settings: { ...data.settings, email } })}
               />
               <Check
                 isSelected={data.settings.acceptTerms}
+                isDisabled={busy}
                 onChange={(acceptTerms) =>
                   setData({ ...data, settings: { ...data.settings, acceptTerms } })
                 }
@@ -170,26 +214,56 @@ export function Settings() {
                 Read the subscriber agreement
               </Link>
               <div className="actions">
-                <Button
-                  className="secondary"
-                  isDisabled={busy}
-                  onPress={async () => {
-                    setBusy(true);
-                    setError('');
-                    try {
-                      const next = await api<SetupStatus>('/api/setup/status');
-                      setData(next);
-                      setAdmins((next.settings.admins ?? []).join(','));
-                    } catch (e) {
-                      setError((e as Error).message);
-                    } finally {
-                      setBusy(false);
-                    }
-                  }}
-                >
-                  Reload settings
-                </Button>
-                <Button type="submit" isDisabled={busy}>
+                {dirty ? (
+                  <Confirm
+                    label="Reload settings"
+                    title="Discard unsaved changes?"
+                    isDisabled={busy}
+                    onConfirm={async () => {
+                      if (busyRef.current) return;
+                      busyRef.current = true;
+                      setBusy(true);
+                      try {
+                        const next = await api<SetupStatus>('/api/setup/status');
+                        setData(next);
+                        setSavedSettings(next.settings);
+                        setAdmins((next.settings.admins ?? []).join(','));
+                      } catch (e) {
+                        setError((e as Error).message);
+                      } finally {
+                        busyRef.current = false;
+                        setBusy(false);
+                      }
+                    }}
+                  >
+                    Your unsaved edits will be discarded.
+                  </Confirm>
+                ) : (
+                  <Button
+                    className="secondary"
+                    isDisabled={busy || dirty}
+                    onPress={async () => {
+                      if (busyRef.current) return;
+                      busyRef.current = true;
+                      setBusy(true);
+                      setError('');
+                      try {
+                        const next = await api<SetupStatus>('/api/setup/status');
+                        setData(next);
+                        setSavedSettings(next.settings);
+                        setAdmins((next.settings.admins ?? []).join(','));
+                      } catch (e) {
+                        setError((e as Error).message);
+                      } finally {
+                        busyRef.current = false;
+                        setBusy(false);
+                      }
+                    }}
+                  >
+                    Reload settings
+                  </Button>
+                )}
+                <Button type="submit" isDisabled={busy || !dirty}>
                   Save settings
                 </Button>
               </div>
@@ -201,6 +275,8 @@ export function Settings() {
               isSelected={geo ?? false}
               isDisabled={geo === undefined || busy}
               onChange={async (enabled) => {
+                if (busyRef.current) return;
+                busyRef.current = true;
                 setBusy(true);
                 setError('');
                 try {
@@ -210,6 +286,7 @@ export function Settings() {
                 } catch (e) {
                   setError((e as Error).message);
                 } finally {
+                  busyRef.current = false;
                   setBusy(false);
                 }
               }}
@@ -249,6 +326,8 @@ export function Settings() {
                           className="secondary"
                           isDisabled={busy}
                           onPress={async () => {
+                            if (busyRef.current) return;
+                            busyRef.current = true;
                             setBusy(true);
                             setError('');
                             try {
@@ -257,6 +336,7 @@ export function Settings() {
                             } catch (e) {
                               setError((e as Error).message);
                             } finally {
+                              busyRef.current = false;
                               setBusy(false);
                             }
                           }}
@@ -336,6 +416,38 @@ export function Settings() {
               }}
             >
               Save and remove my access
+            </Button>
+          </div>
+        </Popup>
+      )}
+      {confirmOpenAccess && (
+        <Popup
+          title="Allow all untagged tailnet users?"
+          onClose={() => {
+            if (!busy) setConfirmOpenAccess(false);
+          }}
+          blocking={busy}
+        >
+          <p>
+            An empty administrator list allows any untagged user on your tailnet to access the
+            dashboard.
+          </p>
+          <div className="actions">
+            <Button
+              className="secondary"
+              isDisabled={busy}
+              onPress={() => setConfirmOpenAccess(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              className="danger"
+              isDisabled={busy}
+              onPress={() => {
+                void saveSettings(true);
+              }}
+            >
+              Allow access and save
             </Button>
           </div>
         </Popup>

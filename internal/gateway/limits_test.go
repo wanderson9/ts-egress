@@ -23,7 +23,7 @@ func TestProxyUpgradeThroughIdleMiddleware(t *testing.T) {
 	}))
 	defer upstream.Close()
 	g := New((&net.Dialer{}).DialContext)
-	g.Replace([]Route{{"app.example.com", upstream.URL, true}})
+	g.Replace([]Route{{"app.example.com", upstream.URL, true, "", "", false}})
 	s := httptest.NewServer(IdleTimeout(NewAdmission(512).Middleware(g)))
 	defer s.Close()
 	c, err := net.Dial("tcp", s.Listener.Addr().String())

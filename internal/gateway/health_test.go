@@ -22,7 +22,7 @@ import (
 func TestCertificateRetryAPI(t *testing.T) {
 	g := New((&net.Dialer{}).DialContext)
 	g.Health = NewHealth(t.TempDir())
-	g.Replace([]Route{{"app.example.com", "http://server", true}})
+	g.Replace([]Route{{"app.example.com", "http://server", true, "", "", false}})
 	g.Health.Certificate("app.example.com", nil, errors.New("DNS validation failed"))
 	if got := g.Health.Snapshot(g.Routes())["app.example.com"].Certificate; got.Detail != "DNS validation failed" || got.Attempt != "Failed" {
 		t.Fatalf("failure diagnostic lost: %+v", got)
@@ -67,7 +67,7 @@ func TestCertificateRetryAPI(t *testing.T) {
 func TestServiceHealth(t *testing.T) {
 	dir := t.TempDir()
 	h := NewHealth(dir)
-	routes := []Route{{"app.example.com", "http://server:3000", true}}
+	routes := []Route{{"app.example.com", "http://server:3000", true, "", "", false}}
 	h.SetPeers(map[string]PeerHealth{"server": {State: "Offline"}})
 	h.Reconcile(routes)
 	h.ResponseForUpstream("app.example.com", "http://server:3000", "connection refused")
@@ -82,6 +82,9 @@ func TestServiceHealth(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.WriteFile(filepath.Join(dir, "app.example.com"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0600)
+	h.mu.Lock()
+	h.cacheRefreshed["app.example.com"] = time.Time{}
+	h.mu.Unlock()
 	if s := h.Snapshot(routes)["app.example.com"]; s.Certificate.State != "Valid" {
 		t.Fatal(s)
 	}
@@ -97,6 +100,9 @@ func TestServiceHealth(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "app.example.com"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: renewed}), 0600); err != nil {
 		t.Fatal(err)
 	}
+	h.mu.Lock()
+	h.cacheRefreshed["app.example.com"] = time.Time{}
+	h.mu.Unlock()
 	if s := h.Snapshot(routes)["app.example.com"]; s.Certificate.Expires.Before(time.Now().Add(59 * 24 * time.Hour)) {
 		t.Fatal("renewal not reflected", s)
 	}
@@ -111,8 +117,8 @@ func TestServiceHealth(t *testing.T) {
 		t.Fatal(s)
 	}
 	h.ResponseForUpstream("app.example.com", "http://server:3000", "old upstream failure")
-	h.Reconcile([]Route{{"app.example.com", "http://new-server:3000", true}})
-	updated := []Route{{"app.example.com", "http://new-server:3000", true}}
+	h.Reconcile([]Route{{"app.example.com", "http://new-server:3000", true, "", "", false}})
+	updated := []Route{{"app.example.com", "http://new-server:3000", true, "", "", false}}
 	if s := h.Snapshot(updated)["app.example.com"]; s.LastError != "" || !s.LastResponse.IsZero() {
 		t.Fatal("upstream health carried across backend change", s)
 	}
@@ -133,7 +139,7 @@ func TestServiceHealth(t *testing.T) {
 
 func TestCertificateRetryCanBeCancelled(t *testing.T) {
 	h := NewHealth(t.TempDir())
-	h.Reconcile([]Route{{"app.example.com", "http://server:3000", true}})
+	h.Reconcile([]Route{{"app.example.com", "http://server:3000", true, "", "", false}})
 	h.Certificate("app.example.com", nil, errors.New("failed"))
 	h.mu.Lock()
 	h.failedAt["app.example.com"] = time.Now()
@@ -149,7 +155,7 @@ func TestCertificateRetryCanBeCancelled(t *testing.T) {
 		t.Fatal("cancelled retry request ran")
 	case <-time.After(20 * time.Millisecond):
 	}
-	if h.Snapshot([]Route{{"app.example.com", "http://server:3000", true}})["app.example.com"].Certificate.Attempt == "Issuing" {
+	if h.Snapshot([]Route{{"app.example.com", "http://server:3000", true, "", "", false}})["app.example.com"].Certificate.Attempt == "Issuing" {
 		t.Fatal("cancel left stale issuing status")
 	}
 }
@@ -157,7 +163,7 @@ func TestCertificateRetryCanBeCancelled(t *testing.T) {
 func TestCertificateRetryUsesServiceLifetime(t *testing.T) {
 	h := NewHealth(t.TempDir())
 	domain := "app.example.com"
-	h.Reconcile([]Route{{domain, "http://server:3000", true}})
+	h.Reconcile([]Route{{domain, "http://server:3000", true, "", "", false}})
 	h.Certificate(domain, nil, errors.New("failed"))
 	h.mu.Lock()
 	h.failedAt[domain] = time.Now().Add(-2 * time.Minute)
@@ -178,7 +184,7 @@ func TestCertificateRetryUsesServiceLifetime(t *testing.T) {
 func TestCancelledActiveRetryCannotRestoreRemovedRouteHealth(t *testing.T) {
 	h := NewHealth(t.TempDir())
 	domain := "app.example.com"
-	h.Reconcile([]Route{{domain, "http://server", true}})
+	h.Reconcile([]Route{{domain, "http://server", true, "", "", false}})
 	h.Certificate(domain, nil, errors.New("failed"))
 	h.mu.Lock()
 	h.failedAt[domain] = time.Now().Add(-2 * time.Minute)

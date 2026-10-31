@@ -32,7 +32,7 @@ func TestProxyFailurePage(t *testing.T) {
 	g := New(func(context.Context, string, string) (net.Conn, error) {
 		return nil, errors.New("private backend detail")
 	})
-	g.Replace([]Route{{"app.example.com", "http://server:3000", true}})
+	g.Replace([]Route{{"app.example.com", "http://server:3000", true, "", "", false}})
 	w := httptest.NewRecorder()
 	g.ServeHTTP(w, httptest.NewRequest("GET", "http://app.example.com/", nil))
 	if w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "Service unavailable") || strings.Contains(w.Body.String(), "private backend detail") {
@@ -49,7 +49,7 @@ func TestUpstreamErrorsPreserved(t *testing.T) {
 	}))
 	defer up.Close()
 	g := New((&net.Dialer{}).DialContext)
-	g.Replace([]Route{{"app.example.com", up.URL, true}})
+	g.Replace([]Route{{"app.example.com", up.URL, true, "", "", false}})
 	w := httptest.NewRecorder()
 	g.ServeHTTP(w, httptest.NewRequest("GET", "http://app.example.com/", nil))
 	if w.Code != 404 || w.Body.String() != "application not found" {

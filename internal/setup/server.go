@@ -296,8 +296,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "invalid settings JSON", 400)
 				return
 			}
-			if private && excludesAdmin(v.Admins, gateway.AdminIdentity(r.Context())) && r.Header.Get("X-Confirm-Admin-Lockout") != "1" {
-				http.Error(w, "this change removes your access; confirm administrator lockout before saving", http.StatusConflict)
+			current := s.store.Get()
+			needsConfirm := private && requiresAdminConfirmation(current.Admins, v.Admins, gateway.AdminIdentity(r.Context()))
+			confirmed := r.Header.Get("X-Confirm-Admin-Lockout") == "1"
+			if len(current.Admins) > 0 && len(v.Admins) == 0 {
+				confirmed = r.Header.Get("X-Confirm-Admin-Change") == "1"
+			}
+			if needsConfirm && !confirmed {
+				http.Error(w, "administrator change needs explicit confirmation", http.StatusConflict)
 				return
 			}
 			revision, err := strconv.ParseUint(r.Header.Get("If-Match"), 10, 64)
@@ -343,6 +349,12 @@ func excludesAdmin(admins []string, actor string) bool {
 		}
 	}
 	return true
+}
+
+// An empty allowlist permits every untagged tailnet user, so moving from a
+// restricted list to empty is a security-sensitive public exposure change.
+func requiresAdminConfirmation(current, next []string, actor string) bool {
+	return len(current) > 0 && len(next) == 0 || excludesAdmin(next, actor)
 }
 func (s *Server) dashboard(host, origin string) http.Handler {
 	return s.gateway.AdminOrigin(s.routesPath, host, origin, func(context.Context, string) (string, error) { return "local administrator", nil })

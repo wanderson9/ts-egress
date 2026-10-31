@@ -3,8 +3,8 @@ package gateway
 import "testing"
 
 func TestRevisionRejectsPreRestartEdits(t *testing.T) {
-	old := []Route{{"app.example.com", "http://old:3000", true}}
-	current := []Route{{"app.example.com", "http://new:3000", true}}
+	old := []Route{{"app.example.com", "http://old:3000", true, "", "", false}}
+	current := []Route{{"app.example.com", "http://new:3000", true, "", "", false}}
 	first := New(nil)
 	first.Replace(old)
 	stale := first.Revision()

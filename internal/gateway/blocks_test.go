@@ -29,7 +29,7 @@ func TestBlocksPersistAndRejectPublicRequests(t *testing.T) {
 	}
 	g := New((&net.Dialer{}).DialContext)
 	g.Blocks = b
-	g.Replace([]Route{{"app.example.com", "http://server:3000", true}})
+	g.Replace([]Route{{"app.example.com", "http://server:3000", true, "", "", false}})
 	r := httptest.NewRequest("GET", "http://app.example.com/", nil)
 	r.RemoteAddr = "8.8.8.8:1234"
 	r.Header.Set("X-Forwarded-For", "1.1.1.1")

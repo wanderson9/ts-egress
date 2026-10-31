@@ -85,8 +85,9 @@ The ACME email is used for initial account registration and is locked once conne
 
 - Automatic public TLS certificates and renewal.
 - HTTP streaming and WebSocket support.
-  Public transfers have a 60-second read/write idle timeout and a 32-request concurrent limit per source IP (512 gateway-wide). WebSocket clients must send traffic or heartbeat pings at least every 60 seconds; active streams have no total duration limit. Shared NAT clients share the source-IP limit.
+  Public transfers have a 60-second read/write idle timeout, including stalled upstream response bodies, and a 32-request concurrent limit per source IP (512 gateway-wide). WebSocket clients must send traffic or heartbeat pings at least every 60 seconds; active streams have no total duration limit. Shared NAT clients share the source-IP limit.
 - Separate Tailscale host, backend HTTP, and certificate status.
+  Backend checks use the public Host header. Certificate metadata refreshes within five seconds; status does not verify public DNS or external reachability.
 - Rolling 24-hour client traffic statistics, sorted by total bandwidth. Statistics reset on restart.
 - Optional country lookups through ipwho.is; enabling this discloses selected public client IPs to that provider.
 - Persistent, gateway-wide IP blocking. Blocks affect new proxy requests, not existing streams, and use the direct connection source IP.

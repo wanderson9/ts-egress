@@ -519,12 +519,16 @@ func run() error {
 		certMu.Unlock()
 		// ACME validation handshakes must not overwrite issuance state.
 		challenge := len(hello.SupportedProtos) == 1 && hello.SupportedProtos[0] == "acme-tls/1"
+		var issuance *gateway.Issuance
+		if !challenge {
+			issuance = g.Health.StartIssuance(hello.ServerName)
+		}
+		if issuance != nil {
+			defer issuance.Finish(g.Health)
+		}
 		cert, err := m.GetCertificate(hello)
 		if !challenge {
-			if err != nil || cert == nil || len(cert.Certificate) == 0 {
-				g.Health.Issuing(hello.ServerName)
-			}
-			g.Health.Certificate(hello.ServerName, cert, err)
+			issuance.Complete(g.Health, cert, err)
 		}
 		return cert, err
 	}

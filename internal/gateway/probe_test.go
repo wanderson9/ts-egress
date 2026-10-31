@@ -25,7 +25,7 @@ func TestBackendProbeSeparateFromHost(t *testing.T) {
 	defer backend.Close()
 	g := New((&net.Dialer{}).DialContext)
 	g.Health = NewHealth(t.TempDir())
-	routes := []Route{{"app.example.com", backend.URL, true}}
+	routes := []Route{{"app.example.com", backend.URL, true, "", "", false}}
 	g.Replace(routes)
 	for _, tc := range []struct {
 		code  int
@@ -64,7 +64,7 @@ func TestProbeCapacityAtRouteLimit(t *testing.T) {
 	g.Health = NewHealth(t.TempDir())
 	routes := make([]Route, 1000)
 	for i := range routes {
-		routes[i] = Route{fmt.Sprintf("app%d.example.com", i), "http://server", true}
+		routes[i] = Route{fmt.Sprintf("app%d.example.com", i), "http://server", true, "", "", false}
 	}
 	g.Replace(routes)
 	var running, peak, completed atomic.Int32
@@ -103,7 +103,7 @@ func TestBackendProbeDoesNotFollowRedirect(t *testing.T) {
 	defer backend.Close()
 	g := New((&net.Dialer{}).DialContext)
 	g.Health = NewHealth(t.TempDir())
-	g.Replace([]Route{{"app.example.com", backend.URL, true}})
+	g.Replace([]Route{{"app.example.com", backend.URL, true, "", "", false}})
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
 	g.MonitorBackends(ctx)

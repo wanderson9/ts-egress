@@ -1,9 +1,11 @@
 package gateway
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"golang.org/x/crypto/bcrypt"
 	"net"
 	"net/netip"
 	"net/url"
@@ -15,9 +17,12 @@ import (
 )
 
 type Route struct {
-	Domain   string `json:"domain"`
-	Upstream string `json:"upstream"`
-	Enabled  bool   `json:"enabled"`
+	Domain            string `json:"domain"`
+	Upstream          string `json:"upstream"`
+	Enabled           bool   `json:"enabled"`
+	BasicAuthUser     string `json:"basicAuthUser,omitempty"`
+	BasicAuthPassword string `json:"basicAuthPassword,omitempty"`
+	BasicAuth         bool   `json:"basicAuth,omitempty"`
 }
 
 var label = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -40,6 +45,21 @@ func Validate(routes []Route) error {
 	}
 	seen := map[string]bool{}
 	for _, r := range routes {
+		if r.BasicAuth && r.BasicAuthUser == "" {
+			return errors.New("basic authentication requires credentials")
+		}
+		if (r.BasicAuthUser == "") != (r.BasicAuthPassword == "") || len(r.BasicAuthUser) > 255 || strings.ContainsAny(r.BasicAuthUser, "\r\n\x00") {
+			return errors.New("basic authentication requires a username and password (maximum 72 password bytes)")
+		}
+		if strings.HasPrefix(r.BasicAuthPassword, "bcrypt:") {
+			encoded := strings.TrimPrefix(r.BasicAuthPassword, "bcrypt:")
+			hash, err := base64.RawStdEncoding.DecodeString(encoded)
+			if _, costErr := bcrypt.Cost(hash); err != nil || costErr != nil {
+				return errors.New("invalid basic authentication verifier")
+			}
+		} else if len(r.BasicAuthPassword) > 72 || strings.ContainsAny(r.BasicAuthPassword, "\r\n\x00") {
+			return errors.New("basic authentication password must be at most 72 bytes")
+		}
 		if !ValidDomain(r.Domain) {
 			return fmt.Errorf("invalid public domain %q (use lowercase DNS names)", r.Domain)
 		}
@@ -103,7 +123,11 @@ func Save(path string, routes []Route) error {
 	if err := Validate(routes); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(routes, "", "  ")
+	stored, err := PersistedRoutes(routes)
+	if err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(stored, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -135,4 +159,19 @@ func Save(path string, routes []Route) error {
 		return err
 	}
 	return dir.Close()
+}
+
+// PersistedRoutes returns an isolated configuration with password verifiers, never plaintext.
+func PersistedRoutes(routes []Route) ([]Route, error) {
+	out := append([]Route(nil), routes...)
+	for i := range out {
+		if out[i].BasicAuthUser != "" && !strings.HasPrefix(out[i].BasicAuthPassword, "bcrypt:") {
+			hash, err := bcrypt.GenerateFromPassword([]byte(out[i].BasicAuthPassword), bcrypt.DefaultCost)
+			if err != nil {
+				return nil, err
+			}
+			out[i].BasicAuthPassword = "bcrypt:" + base64.RawStdEncoding.EncodeToString(hash)
+		}
+	}
+	return out, nil
 }

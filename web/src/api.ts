@@ -1,4 +1,11 @@
-export type Route = { domain: string; upstream: string; enabled: boolean };
+export type Route = {
+  domain: string;
+  upstream: string;
+  enabled: boolean;
+  basicAuthUser?: string;
+  basicAuthPassword?: string;
+  basicAuth?: boolean;
+};
 export type Totals = {
   requests: number;
   received: number;
