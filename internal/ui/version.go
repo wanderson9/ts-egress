@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const Version = "v0.2.0"
+const Version = "v0.2.1"
 const Repository = "https://github.com/wanderson9/ts-egress"
 
 var releases = struct {

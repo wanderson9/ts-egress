@@ -20,7 +20,7 @@ Save as `compose.yaml`:
 ```yaml
 services:
   ts-egress:
-    image: ghcr.io/wanderson9/ts-egress:v0.2.0
+    image: ghcr.io/wanderson9/ts-egress:v0.2.1
     restart: unless-stopped
     ports:
       - "127.0.0.1:8080:8080"
