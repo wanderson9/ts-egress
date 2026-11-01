@@ -264,11 +264,19 @@ func (g *Gateway) AdminWithSetup(path, host, origin string, identify Identity, s
 			}
 		}
 		for _, old := range oldRoutes {
+			if old.BasicAuthUser == "" || r.Header.Get("X-Confirm-Auth-Removal") == "1" {
+				continue
+			}
+			authPreserved := false
 			for _, next := range routes {
-				if old.BasicAuthUser != "" && next.BasicAuthUser == "" && !next.BasicAuth && (old.Domain == next.Domain || !hasDomain(routes, old.Domain)) && r.Header.Get("X-Confirm-Auth-Removal") != "1" {
-					http.Error(w, "confirm removal of site authentication", 409)
-					return
+				if next.Domain == old.Domain && next.BasicAuthUser != "" {
+					authPreserved = true
+					break
 				}
+			}
+			if !authPreserved {
+				http.Error(w, "confirm removal of site authentication", 409)
+				return
 			}
 		}
 		if err := Validate(routes); err != nil {

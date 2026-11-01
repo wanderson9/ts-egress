@@ -203,6 +203,36 @@ func TestBasicAuthStatusRedactionPreservationAndRemoval(t *testing.T) {
 	if g.Routes()[0].BasicAuthUser != "" {
 		t.Fatal("authentication not removed")
 	}
+
+	// Removing the route entirely must also require explicit confirmation.
+	status = adminTestRequest(h, "GET", "/api/status", nil, nil)
+	if err := json.Unmarshal(status.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	edit = payload.Routes
+	edit[0].BasicAuthUser = "alice"
+	edit[0].BasicAuthPassword = "restore password"
+	edit[0].BasicAuth = true
+	b, _ = json.Marshal(edit)
+	put = adminTestRequest(h, "PUT", "/api/routes", b, map[string]string{"If-Match": strconv.FormatUint(payload.Revision, 10)})
+	if put.Code != 204 {
+		t.Fatalf("restore authentication: %d %s", put.Code, put.Body)
+	}
+	status = adminTestRequest(h, "GET", "/api/status", nil, nil)
+	if err := json.Unmarshal(status.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	b, _ = json.Marshal([]Route{})
+	base = map[string]string{"If-Match": strconv.FormatUint(payload.Revision, 10)}
+	put = adminTestRequest(h, "PUT", "/api/routes", b, base)
+	if put.Code != 409 {
+		t.Fatalf("route deletion without confirmation: %d %s", put.Code, put.Body)
+	}
+	base["X-Confirm-Auth-Removal"] = "1"
+	put = adminTestRequest(h, "PUT", "/api/routes", b, base)
+	if put.Code != 204 {
+		t.Fatalf("confirmed route deletion: %d %s", put.Code, put.Body)
+	}
 }
 
 func TestBasicAuthRejectsBadVerifierAndMalformedFlag(t *testing.T) {
