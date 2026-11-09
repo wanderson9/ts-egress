@@ -388,7 +388,7 @@ describe('React Aria interfaces', () => {
       return response({
         settings: {
           hostname: 'ts-egress',
-          admins: [],
+          admins: ['admin@example.com'],
           email: 'you@example.com',
           acceptTerms: true,
           connect: true,

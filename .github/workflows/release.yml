@@ -44,6 +44,12 @@ jobs:
           npm run build
           cd ..
           git diff --exit-code -- internal/ui/dist
+      - name: Smoke test container runtime
+        run: make smoke
+      - name: Scan release candidate container before publishing
+        run: |
+          docker build -t ts-egress:release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT} .
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.0 image --scanners vuln --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed ts-egress:release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
       - name: Reserve unpublished version
         env:
           GH_TOKEN: ${{ github.token }}

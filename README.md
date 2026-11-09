@@ -59,7 +59,7 @@ docker compose up -d
 | `443:443/tcp` | Public HTTPS services |
 | `/data` | Persistent settings, routes, Tailscale identity, certificates, and IP blocks |
 
-Keep `/data` persistent and backed up. The container runs as UID/GID `10001:10001`; bind-mounted storage must be writable by that user.
+Keep `/data` persistent and backed up. The container runs as UID/GID `10001:10001`; bind-mounted storage must be writable by that user. Run exactly one instance against a state directory/volume: state is not coordinated between writers, so do not share it between replicas. Stop the service before taking a consistent backup; restore the complete state directory (including Tailscale identity and certificate data) while stopped, then restart. Treat backups as secrets.
 
 ## Application setup
 
@@ -79,7 +79,24 @@ After enrollment, administration is available at the gateway's private Tailscale
 
 The ACME email is used for initial account registration and is locked once connection setup begins. It does not update an existing Let's Encrypt account contact; update existing account contacts with the certificate authority rather than deleting certificate or account state.
 
-> **Keep port 8080 bound to loopback.** Enabled services are public; protect sensitive applications with their own authentication. The administrator allowlist is optional—an empty list admits any untagged user on your tailnet.
+> **Keep port 8080 bound to host loopback** exactly as shown. The container listens on all interfaces internally, so publishing `8080:8080`, using host networking, or allowing untrusted containers on the same network can expose first-run setup and administrator recovery. Do not proxy this listener through a public reverse proxy. Anyone reaching an unclaimed setup listener can claim it. Use the SSH tunnel above for remote administration.
+
+### Tailnet access policy
+
+Use a dedicated tag for the gateway and grant it only the backend ports it must reach. For example, adapt this fragment to your tailnet's ACL/grant policy and actual tagged backend identities and ports:
+
+```json
+{
+  "tagOwners": { "tag:ts-egress": ["autogroup:admin"] },
+  "grants": [
+    { "src": ["tag:ts-egress"], "dst": ["tag:app-backend"], "ip": ["tcp:8080"] }
+  ]
+}
+```
+
+Enroll the gateway as `tag:ts-egress`; make backend devices `tag:app-backend` (or use explicit device selectors supported by your policy). Add only the required protocol/ports, and separately allow intended human administrators to reach the gateway's dashboard. The gateway uses its own Tailscale identity for backend connections—not the public visitor's identity or permissions. A visitor can reach any enabled public route, so use app-level authentication for private content.
+
+Define ownership for your backend tags as well, and remove any existing broad allow-all rule that would override this restriction. Set administrator login names during setup. An empty administrator allowlist admits every untagged user that can reach the dashboard; new setup requires explicitly opting in to that open access.
 
 ## Features
 
@@ -92,7 +109,37 @@ The ACME email is used for initial account registration and is locked once conne
 - Optional country lookups through ipwho.is; enabling this discloses selected public client IPs to that provider.
 - Persistent, gateway-wide IP blocking. Blocks affect new proxy requests, not existing streams, and use the direct connection source IP.
 
-Upstreams must be Tailscale peers. Wildcard domains, subnet-route destinations, raw TCP/UDP proxying, and built-in public application authentication are not supported.
+The gateway makes outbound connections to Tailscale, Let's Encrypt/ACME, configured peer backends, GitHub for cached release-version checks when the UI requests version information, and (only when country lookup is enabled) ipwho.is. Its public endpoints are intended to be reachable from the internet: configured routes are public unless protected by Basic authentication or the backend itself. This is a single-instance reverse proxy, not a WAF, DDoS mitigation service, or high-availability deployment. Keep the image and standalone binary updated, verify release checksums, and review release notes before upgrading; back up state before upgrades.
+
+Upstreams must be Tailscale peers; wildcard domains, subnet-route destinations, and raw TCP/UDP proxying are not supported. Optional per-service HTTP Basic authentication is supported over HTTPS. Usernames and passwords are stored as route credentials (passwords are bcrypt-hashed); Basic credentials are reusable secrets, so require HTTPS and avoid reusing passwords. This is a single shared credential per service, not per-user accounts, SSO, MFA, or role-based authorization; it does not replace the backend application's own security controls.
+
+## Backup and recovery
+
+For Compose, stop the only service before copying the volume, and restore it with the service stopped. For example, with Docker's named volume:
+
+```sh
+mkdir -m 700 -p ./backup
+chmod 700 ./backup
+sudo chown 10001:10001 ./backup
+docker compose stop ts-egress
+docker compose run --rm --no-deps -T --entrypoint tar -v "$PWD/backup:/backup" ts-egress \
+  -C /data -czf /backup/ts-egress-data.tgz .
+# Restore to the same volume only while ts-egress is stopped:
+docker compose run --rm --no-deps -T --entrypoint sh -v "$PWD/backup:/backup" ts-egress \
+  -c 'cd /data && tar -xzf /backup/ts-egress-data.tgz'
+docker compose start ts-egress
+```
+
+Protect the archive: it contains gateway identity and configuration. To recover the local administrator password from a Docker volume, stop the service and run the same image with the recovery flag (the password is read interactively; do not put it on the command line):
+
+```sh
+docker compose stop ts-egress
+docker compose run --rm --no-deps -it --entrypoint /usr/local/bin/ts-egress ts-egress \
+  -state-dir /data -recover-admin
+docker compose start ts-egress
+```
+
+For a native install, stop the process and run `./ts-egress -state-dir ./data -recover-admin`; then restart normally. Recovery can optionally replace the Tailscale admin allowlist with `-recover-admins user@example.com` (comma-separated for multiple users). Do not use recovery as a way to change account email; it only resets the local password and optionally administrators.
 
 ## Standalone binary
 

@@ -42,3 +42,9 @@ jobs:
         run: docker compose build
       - name: Verify Compose configuration
         run: docker compose config --quiet
+      - name: Exercise isolated container startup, authentication, restart, and persistence
+        run: make smoke
+      - name: Scan built container for HIGH and CRITICAL vulnerabilities
+        run: |
+          docker build -t ts-egress:ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT} .
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.0 image --scanners vuln --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed ts-egress:ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
