@@ -227,7 +227,9 @@ func (s *Store) UpdateAtRevision(v Settings, revision uint64, check bool) error 
 	if len(v.Admins) > 0 {
 		v.OpenAccess = false
 	}
-	if v.Connect && len(v.Admins) == 0 && !v.OpenAccess {
+	// Before anyone is admitted, empty means the authorizing account will be
+	// adopted. Afterward it would admit nobody, which is never what a save intends.
+	if len(v.Admins) == 0 && !v.OpenAccess && (len(s.value.Admins) > 0 || s.value.OpenAccess) {
 		return errors.New("add at least one Tailscale administrator, or explicitly enable open access")
 	}
 	if v.Email != "" && (!strings.Contains(v.Email, "@") || strings.ContainsAny(v.Email, "\r\n") || len(v.Email) > 254) {
@@ -239,6 +241,23 @@ func (s *Store) UpdateAtRevision(v Settings, revision uint64, check bool) error 
 	v.PasswordHash = s.value.PasswordHash
 	v.TailnetOnly = s.value.TailnetOnly
 	return s.write(v)
+}
+
+// AdoptOwner makes the Tailscale account that authorized this gateway its
+// administrator when nobody has been chosen. It never replaces an existing
+// allowlist or an explicit open access choice.
+func (s *Store) AdoptOwner(login string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if login == "" || len(s.value.Admins) > 0 || s.value.OpenAccess {
+		return false, nil
+	}
+	v := s.value
+	v.Admins = []string{login}
+	if err := s.write(v); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 func (s *Store) Seal() error {
 	s.mu.Lock()

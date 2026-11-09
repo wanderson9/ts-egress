@@ -381,8 +381,8 @@ func TestEmptyAdminAllowlist(t *testing.T) {
 	v := store.Get()
 	v.Connect = true
 	v.Admins = []string{}
-	if err := store.Update(v); err == nil {
-		t.Fatal("connected without administrators or an open access opt-in")
+	if err := store.Update(v); err != nil {
+		t.Fatalf("first connection awaiting owner adoption rejected: %v", err)
 	}
 	if store.Get().Admits("anyone@example.com") {
 		t.Fatal("empty allowlist admitted a user without opt-in")
@@ -400,6 +400,45 @@ func TestEmptyAdminAllowlist(t *testing.T) {
 	}
 	if got := store.Get(); got.OpenAccess || got.Admits("anyone@example.com") || !got.Admits("me@example.com") {
 		t.Fatalf("allowlist did not replace open access: %+v", got)
+	}
+	v.Admins, v.OpenAccess = nil, false
+	if err := store.Update(v); err == nil {
+		t.Fatal("save removed every administrator without enabling open access")
+	}
+}
+func TestAdoptOwnerOnlyWhenNobodyChosen(t *testing.T) {
+	_, store, _ := fixture(t)
+	if err := store.Claim("a long test password"); err != nil {
+		t.Fatal(err)
+	}
+	if adopted, err := store.AdoptOwner(""); adopted || err != nil {
+		t.Fatalf("adopted an empty login: %v %v", adopted, err)
+	}
+	revision := store.Revision()
+	if adopted, err := store.AdoptOwner("me@example.com"); !adopted || err != nil {
+		t.Fatalf("owner not adopted: %v %v", adopted, err)
+	}
+	if store.Revision() == revision {
+		t.Fatal("adoption did not change the settings revision")
+	}
+	reopened, err := Open(filepath.Dir(store.path))
+	if err != nil || !reopened.Get().Admits("me@example.com") || reopened.Get().Admits("other@example.com") {
+		t.Fatalf("adoption not persisted: %v %+v", err, reopened.Get())
+	}
+	if adopted, err := store.AdoptOwner("other@example.com"); adopted || err != nil || store.Get().Admits("other@example.com") {
+		t.Fatalf("replaced an existing administrator: %v %v", adopted, err)
+	}
+	_, open, _ := fixture(t)
+	if err := open.Claim("a long test password"); err != nil {
+		t.Fatal(err)
+	}
+	v := open.Get()
+	v.OpenAccess = true
+	if err := open.Update(v); err != nil {
+		t.Fatal(err)
+	}
+	if adopted, err := open.AdoptOwner("me@example.com"); adopted || err != nil || len(open.Get().Admins) != 0 {
+		t.Fatalf("overrode explicit open access: %v %v", adopted, err)
 	}
 }
 func TestClaimRequiresSetupToken(t *testing.T) {

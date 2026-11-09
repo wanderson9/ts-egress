@@ -65,8 +65,8 @@ Keep `/data` persistent and backed up. The container runs as UID/GID `10001:1000
 
 1. Find the one-time setup token in the logs (`docker compose logs ts-egress`). A new token is generated at each start until the gateway is claimed.
 2. Open **http://localhost:8080**, enter the token, and create an administrator password.
-3. Set the gateway name, administrator access, and certificate contact email.
-4. Connect to Tailscale using the authorization link. Enable MagicDNS and HTTPS certificates in your tailnet's DNS settings.
+3. Set the gateway name and certificate contact email.
+4. Connect to Tailscale using the authorization link. The account that authorizes the gateway becomes its administrator; add others in Settings. Enable MagicDNS and HTTPS certificates in your tailnet's DNS settings.
 5. Open the private dashboard and add a service: public domain, tailnet device, port, and HTTP or HTTPS backend.
 6. Point the domain's public DNS records at the gateway host and allow inbound TCP ports **80** and **443**.
 
@@ -97,11 +97,11 @@ Use a dedicated tag for the gateway and grant it only the backend ports it must 
 
 Enroll the gateway as `tag:ts-egress`; make backend devices `tag:app-backend` (or use explicit device selectors supported by your policy). Add only the required protocol/ports, and separately allow intended human administrators to reach the gateway's dashboard. The gateway uses its own Tailscale identity for backend connections—not the public visitor's identity or permissions. A visitor can reach any enabled public route, so use app-level authentication for private content.
 
-Define ownership for your backend tags as well, and remove any existing broad allow-all rule that would override this restriction. Set administrator login names during setup. An empty allowlist admits nobody unless open access is explicitly enabled. Open access admits every untagged user that can reach the dashboard, including users of other tailnets if you share the gateway node with them.
+Define ownership for your backend tags as well, and remove any existing broad allow-all rule that would override this restriction. A tagged gateway has no owning account, so set administrator login names during setup. An untagged gateway with no administrators adopts the account that authorized it. A tagged gateway with an empty allowlist admits nobody unless open access is explicitly enabled. Open access admits every untagged user that can reach the dashboard, including users of other tailnets if you share the gateway node with them.
 
 ### Upgrading to v0.2.2 or later
 
-- **Set administrators first.** A gateway with an empty allowlist and no explicit open access denies everyone at the tailnet dashboard after upgrading, including installs that relied on the old empty-means-everyone behavior. Add your login names in Settings before upgrading. If you are already locked out, use `-recover-admin -recover-admins` as described under [Backup and recovery](#backup-and-recovery).
+- **Administrators.** An empty allowlist no longer admits everyone. An untagged gateway adopts the account that authorized it as administrator, so a single-user install needs no action. On a shared tailnet, that account should add other administrators in Settings. A tagged gateway denies everyone until administrators are set, so add them before upgrading, or use `-recover-admin -recover-admins` as described under [Backup and recovery](#backup-and-recovery).
 - **Basic authentication passwords.** New passwords must be at least 12 bytes. Stored passwords keep working.
 - **Client address headers.** The gateway now removes client-supplied `X-Real-IP`, `True-Client-IP`, `CF-Connecting-IP`, and similar headers, including spellings with underscores. Backends should read the client address from `X-Forwarded-For`.
 - **Short upstream names.** An upstream that uses a short device name now fails if several peers share it. Use the full MagicDNS name.

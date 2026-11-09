@@ -13,6 +13,8 @@ import (
 
 	"tailscale.com/client/local"
 	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/tailcfg"
+	"tailscale.com/types/views"
 	"ts-egress/internal/gateway"
 	"ts-egress/internal/setup"
 )
@@ -238,4 +240,82 @@ func (n *blockingNode) Start() error {
 	close(n.started)
 	<-n.release
 	return errors.New("injected start failure")
+}
+
+func TestOwnerLogin(t *testing.T) {
+	const id = tailcfg.UserID(7)
+	users := map[tailcfg.UserID]tailcfg.UserProfile{id: {LoginName: "me@example.com"}}
+	tags := views.SliceOf([]string{"tag:ts-egress"})
+	for _, tc := range []struct {
+		name string
+		st   *ipnstate.Status
+		want string
+	}{
+		{"user node", &ipnstate.Status{Self: &ipnstate.PeerStatus{UserID: id}, User: users}, "me@example.com"},
+		{"tagged node", &ipnstate.Status{Self: &ipnstate.PeerStatus{UserID: id, Tags: &tags}, User: users}, ""},
+		{"no self", &ipnstate.Status{User: users}, ""},
+		{"unknown user", &ipnstate.Status{Self: &ipnstate.PeerStatus{UserID: 8}, User: users}, ""},
+		{"nil", nil, ""},
+	} {
+		if got := ownerLogin(tc.st); got != tc.want {
+			t.Errorf("%s: %q", tc.name, got)
+		}
+	}
+}
+
+func TestConnectAdoptsAuthorizingAccountBeforeDashboard(t *testing.T) {
+	const id = tailcfg.UserID(7)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(&ipnstate.Status{BackendState: "Running", CertDomains: []string{"egress.ts.net"}, CurrentTailnet: &ipnstate.TailnetStatus{MagicDNSEnabled: true}, Self: &ipnstate.PeerStatus{UserID: id}, User: map[tailcfg.UserID]tailcfg.UserProfile{id: {LoginName: "me@example.com"}}})
+	}))
+	defer api.Close()
+	lc := &local.Client{Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, api.Listener.Addr().String())
+	}}
+	for _, tc := range []struct {
+		name   string
+		admins []string
+		open   bool
+		want   string
+	}{
+		{"nobody chosen", nil, false, "me@example.com"},
+		{"existing allowlist", []string{"other@example.com"}, false, "other@example.com"},
+		{"explicit open access", nil, true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := setup.Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Claim("a long test password"); err != nil {
+				t.Fatal(err)
+			}
+			v := store.Get()
+			v.Admins, v.OpenAccess, v.Connect = tc.admins, tc.open, true
+			if err := store.Update(v); err != nil {
+				t.Fatal(err)
+			}
+			var starts, closes atomic.Int32
+			rt := &runtime{ctx: context.Background(), store: store, newNode: func() tailnetNode { return &readyNode{failingNode{&starts, &closes}, lc} }}
+			rt.Connect()
+			rt.mu.RLock()
+			done := rt.done
+			rt.mu.RUnlock()
+			select {
+			case <-done: // The injected listener failure ends the attempt after adoption.
+			case <-time.After(5 * time.Second):
+				t.Fatal("connect did not finish")
+			}
+			got := store.Get()
+			if tc.want == "" {
+				if len(got.Admins) != 0 || !got.OpenAccess {
+					t.Fatalf("explicit open access changed: %+v", got)
+				}
+				return
+			}
+			if len(got.Admins) != 1 || got.Admins[0] != tc.want || got.OpenAccess {
+				t.Fatalf("admins: %+v", got)
+			}
+		})
+	}
 }

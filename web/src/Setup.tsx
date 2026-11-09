@@ -128,10 +128,6 @@ export function Setup() {
         openAccess: admins.length === 0 && allowAllTailnetUsers,
         connect,
       };
-      if (settings.admins.length === 0 && !allowAllTailnetUsers)
-        throw new Error(
-          'Add at least one Tailscale administrator, or explicitly opt in to open access.',
-        );
       if (!settings.email || !settings.acceptTerms)
         throw new Error(
           'Add a certificate contact email and accept the certificate terms to continue.',
@@ -495,7 +491,7 @@ export function Setup() {
                 />
                 <Field
                   label="Tailscale administrators"
-                  description="Comma-separated Tailscale login names. At least one administrator is required unless you explicitly enable open access below."
+                  description="Optional. Leave empty and the Tailscale account that authorizes this gateway becomes its administrator. A tagged gateway has no owning account, so list login names here."
                   isDisabled={session.tailnet && status.settings.connect}
                   value={draft.admins.join(',')}
                   onChange={(value) => setDraft({ ...draft, admins: value.split(',') })}
@@ -505,11 +501,13 @@ export function Setup() {
                     <Check isSelected={allowAllTailnetUsers} onChange={setAllowAllTailnetUsers}>
                       Allow all untagged tailnet users to administer this gateway
                     </Check>
-                    <p className="warning" role="alert">
-                      Open access gives every untagged user on your tailnet full gateway
-                      administration, including publishing services and changing administrator
-                      access. Only enable this if that is intentional.
-                    </p>
+                    {allowAllTailnetUsers && (
+                      <p className="warning" role="alert">
+                        Open access gives every untagged user on your tailnet full gateway
+                        administration, including publishing services and changing administrator
+                        access. Only enable this if that is intentional.
+                      </p>
+                    )}
                   </div>
                 )}
                 {session.tailnet && status.settings.connect && (

@@ -201,6 +201,18 @@ func (rt *runtime) connect(attemptCtx context.Context, done chan struct{}, attem
 		case <-time.After(3 * time.Second):
 		}
 	}
+	// The dashboard is not listening yet, so nobody can be admitted before this.
+	owner := ownerLogin(st)
+	adopted, err := rt.store.AdoptOwner(owner)
+	if err != nil {
+		fail(fmt.Errorf("save Tailscale administrator: %w", err))
+		return
+	}
+	if adopted {
+		slog.Info("the Tailscale account that authorized this gateway is now its administrator", "login", owner)
+	} else if settings := rt.store.Get(); len(settings.Admins) == 0 && !settings.OpenAccess {
+		slog.Warn("this gateway is tagged and has no owning account, so the tailnet dashboard denies everyone; set administrators with -recover-admin -recover-admins")
+	}
 	domain := st.CertDomains[0]
 	ln, err := ts.ListenTLS("tcp", ":443")
 	if err != nil {
@@ -401,6 +413,15 @@ func (rt *runtime) Dial(ctx context.Context, network, address string) (net.Conn,
 	return ts.Dial(ctx, network, net.JoinHostPort(ip, port))
 }
 
+// ownerLogin returns the account that authorized this node. A tagged node belongs
+// to its tags rather than to a user, so it has no owner to adopt.
+func ownerLogin(st *ipnstate.Status) string {
+	if st == nil || st.Self == nil || (st.Self.Tags != nil && st.Self.Tags.Len() > 0) {
+		return ""
+	}
+	return st.User[st.Self.UserID].LoginName
+}
+
 // peerAddress resolves an upstream host. A full name or IP identifies one peer.
 // A short name can match several, including nodes shared in from other tailnets,
 // so it is accepted only when unambiguous: public traffic must never go to
@@ -510,12 +531,8 @@ func run() error {
 		}
 	}()
 	rt.setup = setup.New(store, rt, g, routesPath)
-	settings := store.Get()
-	if settings.PasswordHash == "" {
+	if store.Get().PasswordHash == "" {
 		slog.Info("first-run setup token; enter it in the setup console to create the administrator", "token", rt.setup.SetupToken())
-	}
-	if settings.Connect && len(settings.Admins) == 0 && !settings.OpenAccess {
-		slog.Warn("no Tailscale administrators are configured, so the tailnet dashboard denies everyone; set them with -recover-admin -recover-admins")
 	}
 	local := server(rt.setup)
 	local.ReadTimeout = 15 * time.Second

@@ -40,25 +40,20 @@ function setup() {
 }
 
 describe('first setup administrator access', () => {
-  it('requires administrator login names by default and exposes explicit warned open access opt-in', async () => {
+  it('adopts the authorizing account by default and warns only on the explicit open access opt-in', async () => {
     const fetcher = setup();
     render(<Setup />);
     const user = userEvent.setup();
     const admins = await screen.findByLabelText('Tailscale administrators');
 
-    expect(screen.getByText(/At least one administrator is required/)).toBeTruthy();
+    expect(screen.getByText(/account that authorizes this gateway/)).toBeTruthy();
     expect(screen.getByRole('checkbox', { name: /Allow all untagged tailnet users/ })).toBeTruthy();
-    expect(screen.getByRole('alert').textContent).toMatch(/full gateway administration/i);
+    expect(screen.queryByText(/full gateway administration/i)).toBeNull();
 
     fireEvent.change(screen.getByLabelText('Initial ACME registration email'), {
       target: { value: 'admin@example.com' },
     });
     await user.click(screen.getByRole('checkbox', { name: /I accept the Let's Encrypt/ }));
-    await user.click(screen.getByRole('button', { name: /Save & continue/ }));
-    expect(await screen.findByText(/explicitly opt in to open access/i)).toBeTruthy();
-    expect(fetcher.mock.calls.some(([url]) => url === '/api/setup/settings')).toBe(false);
-
-    await user.click(screen.getByRole('checkbox', { name: /Allow all untagged tailnet users/ }));
     await user.click(screen.getByRole('button', { name: /Save & continue/ }));
     await waitFor(() =>
       expect(fetcher).toHaveBeenCalledWith('/api/setup/settings', expect.anything()),
@@ -66,6 +61,24 @@ describe('first setup administrator access', () => {
     const saveCall = fetcher.mock.calls.find(([url]) => url === '/api/setup/settings');
     const body = JSON.parse(String(saveCall?.[1]?.body));
     expect(body.admins).toEqual([]);
-    expect(body.openAccess).toBe(true);
+    expect(body.openAccess).toBe(false);
+  });
+  it('sends explicit open access with a warning when opted in', async () => {
+    const fetcher = setup();
+    render(<Setup />);
+    const user = userEvent.setup();
+    await screen.findByLabelText('Tailscale administrators');
+    await user.click(screen.getByRole('checkbox', { name: /Allow all untagged tailnet users/ }));
+    expect(screen.getByRole('alert').textContent).toMatch(/full gateway administration/i);
+    fireEvent.change(screen.getByLabelText('Initial ACME registration email'), {
+      target: { value: 'admin@example.com' },
+    });
+    await user.click(screen.getByRole('checkbox', { name: /I accept the Let's Encrypt/ }));
+    await user.click(screen.getByRole('button', { name: /Save & continue/ }));
+    await waitFor(() =>
+      expect(fetcher).toHaveBeenCalledWith('/api/setup/settings', expect.anything()),
+    );
+    const saveCall = fetcher.mock.calls.find(([url]) => url === '/api/setup/settings');
+    expect(JSON.parse(String(saveCall?.[1]?.body)).openAccess).toBe(true);
   });
 });

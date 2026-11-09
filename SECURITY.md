@@ -15,7 +15,7 @@ Security fixes are made in the latest release only. Keep your image or binary up
 The security boundaries this project intends to enforce:
 
 - Public listeners serve only configured services and never management functions.
-- The tailnet dashboard admits only allowlisted Tailscale identities, or all untagged users if open access was explicitly enabled.
+- The tailnet dashboard admits only allowlisted Tailscale identities, which default to the account that authorized the gateway, or all untagged users if open access was explicitly enabled.
 - The local console is reachable only through host loopback, and first-run setup requires the token printed in the gateway logs.
 - Public traffic reaches only Tailscale peers, never arbitrary addresses.
 
