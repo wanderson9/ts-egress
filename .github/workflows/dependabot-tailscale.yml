@@ -1,0 +1,30 @@
+name: Auto-merge Tailscale updates
+
+# Approves Dependabot's non-major tailscale.com updates and merges them once the
+# checks required on main have passed. This runs no code from the pull request,
+# and merging does not publish anything: a release still requires a version tag.
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  auto-merge:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ github.token }}
+      - name: Approve and enable auto-merge
+        if: steps.metadata.outputs.dependency-names == 'tailscale.com' && steps.metadata.outputs.update-type != 'version-update:semver-major'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr review --approve "$PR_URL"
+          gh pr merge --auto --squash "$PR_URL"
