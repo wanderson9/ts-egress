@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -17,12 +18,23 @@ import (
 type Settings struct {
 	Hostname     string   `json:"hostname"`
 	Admins       []string `json:"admins"`
+	OpenAccess   bool     `json:"openAccess"`
 	Email        string   `json:"email"`
 	AcceptTerms  bool     `json:"acceptTerms"`
 	Connect      bool     `json:"connect"`
 	TailnetOnly  bool     `json:"tailnetOnly"`
 	PasswordHash string   `json:"-"`
 }
+
+// Admits reports whether a verified Tailscale login may administer the gateway.
+// An empty allowlist admits nobody unless open access was explicitly chosen.
+func (v Settings) Admits(login string) bool {
+	if len(v.Admins) == 0 {
+		return v.OpenAccess
+	}
+	return slices.Contains(v.Admins, login)
+}
+
 type diskSettings struct {
 	Settings
 	PasswordHash string `json:"passwordHash"`
@@ -175,6 +187,7 @@ func (s *Store) RecoverAdmin(next string, admins []string) error {
 	v.PasswordHash = string(hash)
 	if admins != nil {
 		v.Admins = admins
+		v.OpenAccess = false
 	}
 	return s.write(v)
 }
@@ -205,12 +218,17 @@ func (s *Store) UpdateAtRevision(v Settings, revision uint64, check bool) error 
 	if len(v.Admins) > 50 {
 		return errors.New("too many administrators")
 	}
-	// An empty allowlist is allowed: it admits any member of the tailnet.
 	for i, a := range v.Admins {
 		v.Admins[i] = strings.TrimSpace(a)
 		if v.Admins[i] == "" || len(a) > 254 {
 			return errors.New("invalid administrator login")
 		}
+	}
+	if len(v.Admins) > 0 {
+		v.OpenAccess = false
+	}
+	if v.Connect && len(v.Admins) == 0 && !v.OpenAccess {
+		return errors.New("add at least one Tailscale administrator, or explicitly enable open access")
 	}
 	if v.Email != "" && (!strings.Contains(v.Email, "@") || strings.ContainsAny(v.Email, "\r\n") || len(v.Email) > 254) {
 		return errors.New("invalid certificate contact email")

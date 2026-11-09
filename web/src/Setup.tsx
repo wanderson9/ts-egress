@@ -22,6 +22,7 @@ export function Setup() {
   const [allowAllTailnetUsers, setAllowAllTailnetUsers] = useState(false);
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [setupToken, setSetupToken] = useState('');
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const [waitingForLogin, setWaitingForLogin] = useState(false);
@@ -82,6 +83,7 @@ export function Setup() {
         if (first) {
           if (!initialized.current) {
             setDraft({ ...data.settings, admins: data.settings.admins ?? [] });
+            setAllowAllTailnetUsers(!!data.settings.openAccess);
             setSettingsRevision(data.settingsRevision);
             initialized.current = true;
             const forceConnect = new URLSearchParams(location.search).get('step') === '2';
@@ -119,9 +121,11 @@ export function Setup() {
   async function save(connect: boolean, advance = false) {
     setBusy(true);
     try {
+      const admins = draft.admins.map((a) => a.trim()).filter(Boolean);
       const settings = {
         ...draft,
-        admins: draft.admins.map((a) => a.trim()).filter(Boolean),
+        admins,
+        openAccess: admins.length === 0 && allowAllTailnetUsers,
         connect,
       };
       if (settings.admins.length === 0 && !allowAllTailnetUsers)
@@ -319,11 +323,14 @@ export function Setup() {
               }
               setBusy(true);
               try {
-                await api(session.claimed ? '/api/setup/login' : '/api/setup/claim', 'POST', {
-                  password,
-                });
+                await api(
+                  session.claimed ? '/api/setup/login' : '/api/setup/claim',
+                  'POST',
+                  session.claimed ? { password } : { password, setupToken: setupToken.trim() },
+                );
                 setPassword('');
                 setConfirmPassword('');
+                setSetupToken('');
                 setSession(await api<Session>('/api/setup/session'));
                 setMessage('Signed in to the local console.');
               } catch (e) {
@@ -333,6 +340,16 @@ export function Setup() {
               }
             }}
           >
+            {!session.claimed && (
+              <Field
+                label="Setup token"
+                description="Printed in the gateway logs at startup. For Docker Compose, run: docker compose logs ts-egress"
+                autoComplete="off"
+                isRequired
+                value={setupToken}
+                onChange={setSetupToken}
+              />
+            )}
             <Field
               label="Administrator password"
               type="password"

@@ -591,7 +591,8 @@ describe('React Aria interfaces', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<Setup />);
     const user = userEvent.setup();
-    await user.type(await screen.findByLabelText('Administrator password'), 'a long test password');
+    await user.type(await screen.findByLabelText('Setup token'), ' token-from-logs ');
+    await user.type(screen.getByLabelText('Administrator password'), 'a long test password');
     await user.type(
       screen.getByLabelText('Confirm administrator password'),
       'a different password',
@@ -610,7 +611,7 @@ describe('React Aria interfaces', () => {
       '/api/setup/claim',
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ password: 'a long test password' }),
+        body: JSON.stringify({ password: 'a long test password', setupToken: 'token-from-logs' }),
       }),
     );
   });

@@ -60,3 +60,25 @@ func TestDialSecurityBoundary(t *testing.T) {
 		t.Fatal("rejected destination reached tsnet dialer")
 	}
 }
+
+func TestPeerAddressRejectsAmbiguousShortNames(t *testing.T) {
+	mine, shared := "100.100.1.2", "100.100.9.9"
+	peers := map[key.NodePublic]*ipnstate.PeerStatus{
+		key.NewNode().Public(): {DNSName: "backend.mine.ts.net.", TailscaleIPs: []netip.Addr{netip.MustParseAddr(mine)}},
+		key.NewNode().Public(): {DNSName: "backend.shared-in.ts.net.", TailscaleIPs: []netip.Addr{netip.MustParseAddr(shared)}},
+		key.NewNode().Public(): {DNSName: "other.mine.ts.net.", TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.100.1.3")}},
+	}
+	if got, err := peerAddress(peers, "backend"); err == nil {
+		t.Fatalf("ambiguous short name resolved to %s", got)
+	}
+	for host, want := range map[string]string{"backend.mine.ts.net": mine, "BACKEND.SHARED-IN.TS.NET": shared, mine: mine, "other": "100.100.1.3"} {
+		for range 20 { // Map iteration order must not change the answer.
+			if got, err := peerAddress(peers, host); err != nil || got != want {
+				t.Fatalf("%s -> %s, %v", host, got, err)
+			}
+		}
+	}
+	if got, err := peerAddress(peers, "missing"); err == nil {
+		t.Fatalf("unknown peer resolved to %s", got)
+	}
+}

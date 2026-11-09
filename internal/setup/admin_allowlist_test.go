@@ -36,6 +36,7 @@ func TestTailnetOpenAdminAccessRequiresDedicatedConfirmation(t *testing.T) {
 	h := s.gateway.AdminWithSetup("unused", host, "https://"+host, func(context.Context, string) (string, error) { return "me@example.com", nil }, s.Tailnet())
 	v = store.Get()
 	v.Admins = nil
+	v.OpenAccess = true
 	body, _ := json.Marshal(v)
 	revision := store.Revision()
 	for _, header := range []string{"", "X-Confirm-Admin-Lockout", "X-Confirm-Admin-Change"} {

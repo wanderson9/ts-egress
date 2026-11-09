@@ -19,9 +19,11 @@ import (
 	"time"
 
 	"golang.org/x/crypto/acme/autocert"
+	"golang.org/x/term"
 	"tailscale.com/client/local"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tsnet"
+	"tailscale.com/types/key"
 	"ts-egress/internal/gateway"
 	"ts-egress/internal/setup"
 )
@@ -216,19 +218,12 @@ func (rt *runtime) connect(attemptCtx context.Context, done chan struct{}, attem
 			return "", errors.New("user identity required")
 		}
 		login := who.UserProfile.LoginName
-		admins := rt.store.Get().Admins
-		// An empty allowlist admits any untagged user on the tailnet. The tsnet
-		// listener is already reachable only by this tailnet, so the allowlist
-		// only narrows access further when an operator chooses to set it.
-		if len(admins) == 0 {
-			return login, nil
+		// Reachability is not authorization: users of other tailnets can reach a
+		// shared node, so only the allowlist or explicit open access admits.
+		if !rt.store.Get().Admits(login) {
+			return "", errors.New("identity not in admin allowlist")
 		}
-		for _, a := range admins {
-			if a == login {
-				return a, nil
-			}
-		}
-		return "", errors.New("identity not in admin allowlist")
+		return login, nil
 	}
 	admin := server(rt.gateway.AdminWithSetup(filepath.Join(rt.stateDir, "routes.json"), domain, "https://"+domain, identify, rt.setup.Tailnet()))
 	admin.ReadTimeout = 15 * time.Second
@@ -399,19 +394,45 @@ func (rt *runtime) Dial(ctx context.Context, network, address string) (net.Conn,
 	if err != nil {
 		return nil, err
 	}
-	for _, peer := range st.Peer {
+	ip, err := peerAddress(st.Peer, host)
+	if err != nil {
+		return nil, err
+	}
+	return ts.Dial(ctx, network, net.JoinHostPort(ip, port))
+}
+
+// peerAddress resolves an upstream host. A full name or IP identifies one peer.
+// A short name can match several, including nodes shared in from other tailnets,
+// so it is accepted only when unambiguous: public traffic must never go to
+// whichever same-named peer happens to come first.
+func peerAddress(peers map[key.NodePublic]*ipnstate.PeerStatus, host string) (string, error) {
+	short := []string{}
+	for _, peer := range peers {
+		if len(peer.TailscaleIPs) == 0 {
+			continue
+		}
+		address := peer.TailscaleIPs[0].String()
 		full := strings.TrimSuffix(peer.DNSName, ".")
-		match := strings.EqualFold(host, full) || strings.EqualFold(host, strings.Split(full, ".")[0])
+		if strings.EqualFold(host, full) {
+			return address, nil
+		}
 		for _, ip := range peer.TailscaleIPs {
 			if host == ip.String() {
-				match = true
+				return address, nil
 			}
 		}
-		if match && len(peer.TailscaleIPs) > 0 {
-			return ts.Dial(ctx, network, net.JoinHostPort(peer.TailscaleIPs[0].String(), port))
+		if strings.EqualFold(host, strings.Split(full, ".")[0]) {
+			short = append(short, address)
 		}
 	}
-	return nil, fmt.Errorf("upstream %q is not a known tailnet peer", host)
+	switch len(short) {
+	case 0:
+		return "", fmt.Errorf("upstream %q is not a known tailnet peer", host)
+	case 1:
+		return short[0], nil
+	default:
+		return "", fmt.Errorf("upstream %q matches %d tailnet peers; use the full MagicDNS name", host, len(short))
+	}
 }
 func server(h http.Handler) *http.Server {
 	return &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 64 * 1024}
@@ -489,6 +510,13 @@ func run() error {
 		}
 	}()
 	rt.setup = setup.New(store, rt, g, routesPath)
+	settings := store.Get()
+	if settings.PasswordHash == "" {
+		slog.Info("first-run setup token; enter it in the setup console to create the administrator", "token", rt.setup.SetupToken())
+	}
+	if settings.Connect && len(settings.Admins) == 0 && !settings.OpenAccess {
+		slog.Warn("no Tailscale administrators are configured, so the tailnet dashboard denies everyone; set them with -recover-admin -recover-admins")
+	}
 	local := server(rt.setup)
 	local.ReadTimeout = 15 * time.Second
 	local.WriteTimeout = 30 * time.Second
@@ -641,13 +669,11 @@ func run() error {
 }
 
 func recoverAdmin(store *setup.Store, admins []string) error {
-	reader := bufio.NewReader(os.Stdin)
 	fmt.Fprint(os.Stderr, "New administrator password (12–72 bytes): ")
-	password, err := reader.ReadString('\n')
-	if err != nil && len(password) == 0 {
+	password, err := readPassword(os.Stdin)
+	if err != nil {
 		return err
 	}
-	password = strings.TrimRight(password, "\r\n")
 	if len(password) < 12 || len(password) > 72 {
 		return errors.New("password must be 12–72 bytes")
 	}
@@ -656,4 +682,19 @@ func recoverAdmin(store *setup.Store, admins []string) error {
 	}
 	fmt.Fprintln(os.Stderr, "Password reset. Restart ts-egress to invalidate existing sessions.")
 	return nil
+}
+
+// readPassword keeps the password off the screen and out of terminal scrollback.
+// Input piped from a file or script has no echo to suppress.
+func readPassword(in *os.File) (string, error) {
+	if fd := int(in.Fd()); term.IsTerminal(fd) {
+		password, err := term.ReadPassword(fd)
+		fmt.Fprintln(os.Stderr)
+		return string(password), err
+	}
+	password, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && len(password) == 0 {
+		return "", err
+	}
+	return strings.TrimRight(password, "\r\n"), nil
 }

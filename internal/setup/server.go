@@ -2,6 +2,7 @@ package setup
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -55,11 +56,16 @@ type Server struct {
 	credentialsMu sync.Mutex // Serializes validation/issuance with password changes/revocation.
 	sessions      map[string]session
 	nextLogin     time.Time
+	setupToken    string
 }
 
 func New(store *Store, runtime Runtime, g *gateway.Gateway, routesPath string) *Server {
-	return &Server{store: store, runtime: runtime, gateway: g, routesPath: routesPath, sessions: map[string]session{}}
+	return &Server{store: store, runtime: runtime, gateway: g, routesPath: routesPath, sessions: map[string]session{}, setupToken: token()}
 }
+
+// SetupToken proves that whoever claims an unclaimed gateway can read its logs,
+// not merely reach the setup listener. It is regenerated at every start.
+func (s *Server) SetupToken() string { return s.setupToken }
 func (s *Server) authenticated(r *http.Request) bool {
 	c, err := r.Cookie("ts_egress_session")
 	if err != nil {
@@ -157,7 +163,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.nextLogin = time.Now().Add(time.Second)
 		s.mu.Unlock()
 		var body struct {
-			Password string `json:"password"`
+			Password   string `json:"password"`
+			SetupToken string `json:"setupToken"`
 		}
 		if decode(w, r, &body) != nil {
 			http.Error(w, "invalid JSON", 400)
@@ -166,6 +173,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.credentialsMu.Lock()
 		defer s.credentialsMu.Unlock()
 		if r.URL.Path == "/api/setup/claim" {
+			if s.store.Get().PasswordHash == "" && subtle.ConstantTimeCompare([]byte(body.SetupToken), []byte(s.setupToken)) != 1 {
+				http.Error(w, "invalid setup token; find it in the gateway logs", 403)
+				return
+			}
 			if err := s.store.Claim(body.Password); err != nil {
 				http.Error(w, err.Error(), 400)
 				return

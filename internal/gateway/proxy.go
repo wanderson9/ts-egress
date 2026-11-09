@@ -2,11 +2,8 @@ package gateway
 
 import (
 	"context"
-	"crypto/subtle"
 	"crypto/tls"
-	"encoding/base64"
 	"errors"
-	"golang.org/x/crypto/bcrypt"
 	"io"
 	"log/slog"
 	"net"
@@ -24,9 +21,28 @@ type table struct {
 	routes   []Route
 	handlers map[string]http.Handler
 	auth     map[string]authCredential
+	state    map[string]*routeState
 	revision uint64
 }
 type authCredential struct{ user, password string }
+
+// maxRouteRequests stops one public service from taking every gateway-wide slot.
+const maxRouteRequests = 256
+
+// routeState survives configuration saves that leave a route's upstream and
+// credentials unchanged. Any other change, or disabling or removing the route,
+// cancels ctx, which also ends its established streams such as WebSockets.
+type routeState struct {
+	fingerprint string
+	ctx         context.Context
+	cancel      context.CancelFunc
+	inflight    atomic.Int64
+}
+
+func routeFingerprint(r Route) string {
+	return r.Upstream + "\x00" + r.BasicAuthUser + "\x00" + r.BasicAuthPassword
+}
+
 type Gateway struct {
 	configMu            sync.Mutex
 	live                atomic.Pointer[table]
@@ -45,6 +61,7 @@ type Gateway struct {
 	RetryContext        context.Context
 	Blocks              *Blocks
 	authSlots           chan struct{}
+	auth                *authGuard
 }
 
 func (g *Gateway) EnableGeo(enabled bool) {
@@ -65,12 +82,25 @@ func NewAdmission(limit int) *Admission {
 	}
 	return &Admission{slots: make(chan struct{}, limit), clients: map[netip.Addr]int{}}
 }
+
+// sourceKey groups addresses one client controls together. An IPv6 subscriber
+// typically holds at least a /64, so per-address accounting would not limit it.
+func sourceKey(ip netip.Addr) netip.Addr {
+	ip = ip.Unmap().WithZone("")
+	if ip.Is6() {
+		if prefix, err := ip.Prefix(64); err == nil {
+			return prefix.Addr()
+		}
+	}
+	return ip
+}
+
 func (a *Admission) Middleware(next http.Handler) http.Handler {
 	if a == nil {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := clientIP(r)
+		ip := sourceKey(clientIP(r))
 		a.mu.Lock()
 		if a.clients[ip] >= 32 {
 			a.mu.Unlock()
@@ -126,7 +156,7 @@ func New(dial func(context.Context, string, string) (net.Conn, error)) *Gateway 
 		}
 		return t
 	}
-	g := &Gateway{transport: transport(true), upgradeTransport: transport(false), upstreamBodyTimeout: upstreamBodyIdleTimeout, authSlots: make(chan struct{}, 4)}
+	g := &Gateway{transport: transport(true), upgradeTransport: transport(false), upstreamBodyTimeout: upstreamBodyIdleTimeout, authSlots: make(chan struct{}, 4), auth: newAuthGuard()}
 	g.RetryContext = context.Background()
 	g.Replace(nil)
 	return g
@@ -168,10 +198,11 @@ func (g *Gateway) replace(routes []Route) {
 		g.Health.Reconcile(routes)
 	}
 	revision := NewRevision()
-	if previous := g.live.Load(); previous != nil {
+	previous := g.live.Load()
+	if previous != nil {
 		revision = previous.revision + 1
 	}
-	t := &table{routes: append([]Route{}, routes...), handlers: make(map[string]http.Handler), auth: make(map[string]authCredential), revision: revision}
+	t := &table{routes: append([]Route{}, routes...), handlers: make(map[string]http.Handler), auth: make(map[string]authCredential), state: make(map[string]*routeState), revision: revision}
 	for _, r := range routes {
 		if r.BasicAuthUser != "" {
 			t.auth[r.Domain] = authCredential{r.BasicAuthUser, r.BasicAuthPassword}
@@ -195,13 +226,7 @@ func (g *Gateway) replace(routes []Route) {
 				// Dial and verify TLS against the upstream, but let applications
 				// construct redirects and cookies using the public request host.
 				p.Out.Host = p.In.Host
-				// Never trust client-supplied forwarding or Tailscale identity headers.
-				for k := range p.Out.Header {
-					if strings.HasPrefix(strings.ToLower(k), "tailscale-") || strings.HasPrefix(strings.ToLower(k), "x-forwarded-") {
-						p.Out.Header.Del(k)
-					}
-				}
-				p.Out.Header.Del("Forwarded")
+				stripUntrustedHeaders(p.Out.Header)
 				p.SetXForwarded()
 			},
 			ModifyResponse: func(resp *http.Response) error {
@@ -250,9 +275,50 @@ func (g *Gateway) replace(routes []Route) {
 			},
 		}
 		t.handlers[r.Domain] = proxy
+		fingerprint := routeFingerprint(r)
+		if previous != nil && previous.state[r.Domain] != nil && previous.state[r.Domain].fingerprint == fingerprint {
+			t.state[r.Domain] = previous.state[r.Domain]
+		} else {
+			ctx, cancel := context.WithCancel(context.Background())
+			t.state[r.Domain] = &routeState{fingerprint: fingerprint, ctx: ctx, cancel: cancel}
+		}
 	}
 	g.live.Store(t)
+	if previous != nil {
+		for domain, state := range previous.state {
+			if t.state[domain] != state {
+				state.cancel()
+			}
+		}
+	}
 	g.CloseIdleConnections()
+}
+
+// spoofableHeaders are client-address headers that applications commonly trust
+// behind a proxy. This gateway sets only X-Forwarded-*.
+var spoofableHeaders = map[string]bool{
+	"forwarded":           true,
+	"x-real-ip":           true,
+	"x-client-ip":         true,
+	"x-cluster-client-ip": true,
+	"x-originating-ip":    true,
+	"x-remote-ip":         true,
+	"x-remote-addr":       true,
+	"true-client-ip":      true,
+	"cf-connecting-ip":    true,
+	"fastly-client-ip":    true,
+}
+
+// stripUntrustedHeaders removes client-supplied identity and address headers.
+// Names are compared with underscores as hyphens because CGI, WSGI, and PHP
+// backends treat X_Forwarded_For and X-Forwarded-For as the same header.
+func stripUntrustedHeaders(header http.Header) {
+	for key := range header {
+		name := strings.ReplaceAll(strings.ToLower(key), "_", "-")
+		if strings.HasPrefix(name, "tailscale-") || strings.HasPrefix(name, "x-forwarded-") || spoofableHeaders[name] {
+			delete(header, key)
+		}
+	}
 }
 
 // CloseIdleConnections drops pooled upstream connections, for example after a
@@ -309,34 +375,24 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "HTTPS required", http.StatusUpgradeRequired)
 			return
 		}
-		user, password, ok := r.BasicAuth()
-		if len(password) > 72 || !ok || subtle.ConstantTimeCompare([]byte(user), []byte(credential.user)) != 1 {
-			w.Header().Set("WWW-Authenticate", `Basic realm="`+host+`", charset="UTF-8`)
-			http.Error(w, "authentication required", http.StatusUnauthorized)
-			return
-		}
-		select {
-		case g.authSlots <- struct{}{}:
-		default:
-			http.Error(w, "authentication service busy", http.StatusServiceUnavailable)
-			return
-		}
-		valid := false
-		if strings.HasPrefix(credential.password, "bcrypt:") {
-			hash, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(credential.password, "bcrypt:"))
-			valid = err == nil && bcrypt.CompareHashAndPassword(hash, []byte(password)) == nil
-		} else {
-			valid = subtle.ConstantTimeCompare([]byte(password), []byte(credential.password)) == 1
-		}
-		<-g.authSlots
-		if !valid {
-			w.Header().Set("WWW-Authenticate", `Basic realm="`+host+`", charset="UTF-8"`)
-			http.Error(w, "authentication required", http.StatusUnauthorized)
+		if !g.authenticate(w, r, host, credential) {
 			return
 		}
 		r = r.Clone(r.Context())
 		r.Header.Del("Authorization")
 	}
+	state := snapshot.state[host]
+	if state.inflight.Add(1) > maxRouteRequests {
+		state.inflight.Add(-1)
+		ErrorPage(w, r, http.StatusServiceUnavailable)
+		return
+	}
+	defer state.inflight.Add(-1)
+	// Ending the request context also closes an upgraded stream's upstream side.
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	defer context.AfterFunc(state.ctx, cancel)()
+	r = r.WithContext(ctx)
 	g.Requests.Add(1)
 	g.Activity.record(host, clientIP(r), Totals{Requests: 1})
 	h.ServeHTTP(w, r)

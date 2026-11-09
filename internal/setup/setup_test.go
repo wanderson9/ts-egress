@@ -60,12 +60,15 @@ func request(s *Server, method, path, body string, cookie *http.Cookie) *httptes
 	s.ServeHTTP(w, r)
 	return w
 }
+func claimBody(s *Server, password string) string {
+	return `{"password":"` + password + `","setupToken":"` + s.SetupToken() + `"}`
+}
 func resetRate(s *Server) { s.mu.Lock(); s.nextLogin = time.Time{}; s.mu.Unlock() }
 
 func TestConcurrentPasswordChangeRevokesOldPasswordLogin(t *testing.T) {
 	for range 5 {
 		s, _, _ := fixture(t)
-		claimed := request(s, "POST", "/api/setup/claim", `{"password":"old long password"}`, nil)
+		claimed := request(s, "POST", "/api/setup/claim", claimBody(s, "old long password"), nil)
 		cookie := claimed.Result().Cookies()[0]
 		resetRate(s)
 		start := make(chan struct{})
@@ -106,7 +109,7 @@ func TestSetupLifecycle(t *testing.T) {
 	if w := request(s, "GET", "/api/setup/status", "", nil); w.Code != 401 {
 		t.Fatal(w.Code)
 	}
-	w := request(s, "POST", "/api/setup/claim", `{"password":"a long test password"}`, nil)
+	w := request(s, "POST", "/api/setup/claim", claimBody(s, "a long test password"), nil)
 	if w.Code != 204 {
 		t.Fatal(w.Code, w.Body.String())
 	}
@@ -118,7 +121,7 @@ func TestSetupLifecycle(t *testing.T) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	resetRate(s)
-	if w := request(s, "POST", "/api/setup/claim", `{"password":"another long password"}`, nil); w.Code != 400 {
+	if w := request(s, "POST", "/api/setup/claim", claimBody(s, "another long password"), nil); w.Code != 400 {
 		t.Fatal("claimed twice")
 	}
 	body := `{"hostname":"my-edge","admins":["you@example.com"],"email":"you@example.com","acceptTerms":true,"connect":true}`
@@ -184,11 +187,11 @@ func TestSetupSecurity(t *testing.T) {
 	if w := request(s, "GET", "/api/status", "", nil); w.Code != 401 {
 		t.Fatal("anonymous route access")
 	}
-	if w := request(s, "POST", "/api/setup/claim", `{"password":"short"}`, nil); w.Code != 400 {
+	if w := request(s, "POST", "/api/setup/claim", claimBody(s, "short"), nil); w.Code != 400 {
 		t.Fatal("weak password accepted")
 	}
 	resetRate(s)
-	if w := request(s, "POST", "/api/setup/claim", `{"password":"a long test password"} {}`, nil); w.Code != 400 {
+	if w := request(s, "POST", "/api/setup/claim", claimBody(s, "a long test password")+" {}", nil); w.Code != 400 {
 		t.Fatal("trailing JSON accepted")
 	}
 }
@@ -295,6 +298,7 @@ func TestSealedConnectionRetryUsesLocalHandler(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := store.Get()
+	v.Admins = []string{"me@example.com"}
 	v.Connect = true
 	if err := store.Update(v); err != nil {
 		t.Fatal(err)
@@ -377,8 +381,58 @@ func TestEmptyAdminAllowlist(t *testing.T) {
 	v := store.Get()
 	v.Connect = true
 	v.Admins = []string{}
+	if err := store.Update(v); err == nil {
+		t.Fatal("connected without administrators or an open access opt-in")
+	}
+	if store.Get().Admits("anyone@example.com") {
+		t.Fatal("empty allowlist admitted a user without opt-in")
+	}
+	v.OpenAccess = true
 	if err := store.Update(v); err != nil {
-		t.Fatalf("empty allowlist rejected: %v", err)
+		t.Fatalf("explicit open access rejected: %v", err)
+	}
+	if !store.Get().Admits("anyone@example.com") {
+		t.Fatal("explicit open access not honored")
+	}
+	v.Admins = []string{"me@example.com"}
+	if err := store.Update(v); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Get(); got.OpenAccess || got.Admits("anyone@example.com") || !got.Admits("me@example.com") {
+		t.Fatalf("allowlist did not replace open access: %+v", got)
+	}
+}
+func TestClaimRequiresSetupToken(t *testing.T) {
+	s, store, _ := fixture(t)
+	for _, body := range []string{`{"password":"a long test password"}`, `{"password":"a long test password","setupToken":"wrong"}`} {
+		resetRate(s)
+		if w := request(s, "POST", "/api/setup/claim", body, nil); w.Code != 403 {
+			t.Fatalf("claimed without the token: %d", w.Code)
+		}
+	}
+	if store.Get().PasswordHash != "" {
+		t.Fatal("password stored without the token")
+	}
+	resetRate(s)
+	if w := request(s, "POST", "/api/setup/claim", claimBody(s, "a long test password"), nil); w.Code != 204 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}
+func TestRecoveryAdminsClearOpenAccess(t *testing.T) {
+	_, store, _ := fixture(t)
+	if err := store.Claim("a long test password"); err != nil {
+		t.Fatal(err)
+	}
+	v := store.Get()
+	v.Connect, v.OpenAccess = true, true
+	if err := store.Update(v); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecoverAdmin("another long password", []string{"me@example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Get(); got.OpenAccess || got.Admits("anyone@example.com") {
+		t.Fatalf("recovery left open access enabled: %+v", got)
 	}
 }
 func TestTailnetHandoffEnforcement(t *testing.T) {
@@ -421,7 +475,7 @@ func TestTailnetHandoffEnforcement(t *testing.T) {
 
 func TestTailnetLogout(t *testing.T) {
 	s, _, rt := fixture(t)
-	w := request(s, "POST", "/api/setup/claim", `{"password":"a long test password"}`, nil)
+	w := request(s, "POST", "/api/setup/claim", claimBody(s, "a long test password"), nil)
 	if w.Code != 204 {
 		t.Fatal(w.Code, w.Body.String())
 	}

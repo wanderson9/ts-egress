@@ -14,6 +14,7 @@ export function Settings() {
   const [geo, setGeo] = useState<boolean>();
   const [blocks, setBlocks] = useState<string[]>();
   const [blocksError, setBlocksError] = useState('');
+  const [newBlock, setNewBlock] = useState('');
   const [connectionError, setConnectionError] = useState('');
   const [connectionChecked, setConnectionChecked] = useState<Date>();
   const [error, setError] = useState('');
@@ -58,7 +59,7 @@ export function Settings() {
       await api(
         '/api/setup/settings',
         'PUT',
-        { ...data.settings, admins: nextAdmins },
+        { ...data.settings, admins: nextAdmins, openAccess: nextAdmins.length === 0 },
         {
           'If-Match': String(data.settingsRevision),
           ...(confirmed && changesToOpenAccess ? { 'X-Confirm-Admin-Change': '1' } : {}),
@@ -187,7 +188,7 @@ export function Settings() {
               <Field label="Tailnet device name" value={data.settings.hostname} isDisabled />
               <Field
                 label="Tailscale administrators"
-                description="Comma-separated login names. Empty allows any untagged user on your tailnet."
+                description="Comma-separated login names. Leaving this empty allows every untagged user on your tailnet, after you confirm."
                 value={admins}
                 isDisabled={busy}
                 onChange={setAdmins}
@@ -297,6 +298,39 @@ export function Settings() {
           <section className="panel padded">
             <h2>Blocked IPs</h2>
             <p>Blocks apply to all public services. Existing streams are not disconnected.</p>
+            <Form
+              onSubmit={async (event) => {
+                event.preventDefault();
+                if (busyRef.current) return;
+                busyRef.current = true;
+                setBusy(true);
+                setError('');
+                try {
+                  await api('/api/blocks', 'PUT', { ip: newBlock.trim(), blocked: true });
+                  setBlocks((await api<{ ips: string[] }>('/api/blocks')).ips);
+                  setNewBlock('');
+                } catch (e) {
+                  setError((e as Error).message);
+                } finally {
+                  busyRef.current = false;
+                  setBusy(false);
+                }
+              }}
+            >
+              <Field
+                label="IP address or range"
+                description="For example 203.0.113.9, 198.51.100.0/24, or 2001:db8:1:2::/64. An IPv6 client usually controls a whole /64."
+                isRequired
+                isDisabled={busy}
+                value={newBlock}
+                onChange={setNewBlock}
+              />
+              <div className="actions">
+                <Button type="submit" className="secondary" isDisabled={busy}>
+                  Block
+                </Button>
+              </div>
+            </Form>
             {blocksError && (
               <p role="alert">
                 Blocked IP status unavailable: {blocksError}.{' '}

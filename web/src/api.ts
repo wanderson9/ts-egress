@@ -29,6 +29,7 @@ export type Activity = {
 export type Settings = {
   hostname: string;
   admins: string[];
+  openAccess?: boolean;
   email: string;
   acceptTerms: boolean;
   connect: boolean;

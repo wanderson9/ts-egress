@@ -16,6 +16,3 @@ CLAUDE.md
 # OS cruft.
 .DS_Store
 
-# Local security review notes.
-/SECURITY.md
-/security.md

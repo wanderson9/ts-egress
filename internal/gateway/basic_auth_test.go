@@ -163,7 +163,7 @@ func TestBasicAuthStatusRedactionPreservationAndRemoval(t *testing.T) {
 	if put.Code != 400 {
 		t.Fatalf("username change without new password: %d", put.Code)
 	}
-	edit[0].BasicAuthPassword = "replacement"
+	edit[0].BasicAuthPassword = "replacement password"
 	b, _ = json.Marshal(edit)
 	put = adminTestRequest(h, "PUT", "/api/routes", b, map[string]string{"If-Match": strconv.FormatUint(payload.Revision, 10)})
 	if put.Code != 204 {

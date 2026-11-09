@@ -64,6 +64,8 @@ describe('first setup administrator access', () => {
       expect(fetcher).toHaveBeenCalledWith('/api/setup/settings', expect.anything()),
     );
     const saveCall = fetcher.mock.calls.find(([url]) => url === '/api/setup/settings');
-    expect(JSON.parse(String(saveCall?.[1]?.body)).admins).toEqual([]);
+    const body = JSON.parse(String(saveCall?.[1]?.body));
+    expect(body.admins).toEqual([]);
+    expect(body.openAccess).toBe(true);
   });
 });

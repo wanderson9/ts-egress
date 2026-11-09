@@ -235,6 +235,11 @@ func (g *Gateway) AdminWithSetup(path, host, origin string, identify Identity, s
 				http.Error(w, "password verifier is not accepted from clients", 400)
 				return
 			}
+			// Blank keeps the stored verifier and is checked after the merge below.
+			if password := routes[i].BasicAuthPassword; password != "" && len(password) < MinBasicAuthPassword {
+				http.Error(w, "basic authentication password must be at least "+strconv.Itoa(MinBasicAuthPassword)+" bytes", 400)
+				return
+			}
 		}
 		revision, err := strconv.ParseUint(r.Header.Get("If-Match"), 10, 64)
 		if err != nil {

@@ -219,4 +219,34 @@ describe('Settings drafts and administrator changes', () => {
       'admin@example.com,draft@example.com',
     );
   });
+  it('blocks an address range and sends the open access opt-in only for an empty list', async () => {
+    const fetcher = setup();
+    render(<Settings />);
+    const user = userEvent.setup();
+    const range = await screen.findByLabelText('IP address or range');
+    await user.type(range, ' 2001:db8:1:2::/64 ');
+    await user.click(screen.getByRole('button', { name: 'Block' }));
+    await waitFor(() =>
+      expect(fetcher).toHaveBeenCalledWith(
+        '/api/blocks',
+        expect.objectContaining({
+          method: 'PUT',
+          body: JSON.stringify({ ip: '2001:db8:1:2::/64', blocked: true }),
+        }),
+      ),
+    );
+
+    const admins = screen.getByLabelText('Tailscale administrators');
+    const saved = () => {
+      const calls = fetcher.mock.calls.filter(
+        ([url, init]) => url === '/api/setup/settings' && init?.method === 'PUT',
+      );
+      return JSON.parse(String(calls[calls.length - 1]?.[1]?.body));
+    };
+    await waitFor(() => expect((admins as HTMLInputElement).disabled).toBe(false));
+    fireEvent.change(admins, { target: { value: '' } });
+    fireEvent.submit(admins.closest('form')!);
+    await user.click(await screen.findByRole('button', { name: 'Allow access and save' }));
+    await waitFor(() => expect(saved().openAccess).toBe(true));
+  });
 });

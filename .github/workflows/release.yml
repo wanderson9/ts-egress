@@ -13,25 +13,27 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# Dependency and project code runs only with a read-only token. Jobs holding write
+# permissions either run no repository code or only build it, and dependency
+# caches are off so that CI runs cannot influence what gets released.
 jobs:
   verify:
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Verify release tag
         run: |
           test "$GITHUB_REF_TYPE" = tag
           test "$GITHUB_REF_NAME" = "$(cat VERSION)"
-      - uses: actions/setup-go@v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - uses: actions/setup-node@v7.1.0
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-          cache: npm
-          cache-dependency-path: web/package-lock.json
       - name: Verify application
         run: |
           go vet ./...
@@ -49,23 +51,37 @@ jobs:
       - name: Scan release candidate container before publishing
         run: |
           docker build -t ts-egress:release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT} .
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.0 image --scanners vuln --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed ts-egress:release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.0@sha256:2416d1f74045b57274df1a340eee6b510cacd73c66a6ccb8da092b117eb7d222 image --scanners vuln --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed ts-egress:release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
+
+  reserve:
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
       - name: Reserve unpublished version
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           # Creation is atomic and rejects existing releases (including drafts).
           # A failed build leaves a draft: investigate before deleting/retrying.
-          gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "$GITHUB_REF_NAME" --notes "Release build in progress."
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "$GITHUB_REF_NAME" --notes "Release build in progress."
 
   binaries:
-    needs: verify
+    needs: reserve
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: actions/setup-go@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
       - name: Build Linux binaries
         run: |
           mkdir -p release
@@ -75,30 +91,37 @@ jobs:
           done
           cd release
           sha256sum *.tar.gz > SHA256SUMS
-      - uses: actions/upload-artifact@v7.0.2
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: release/*.tar.gz
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-binaries
           path: release/*
           if-no-files-found: error
 
   image:
-    needs: verify
+    needs: reserve
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: docker/setup-qemu-action@v4.4.0
-      - uses: docker/setup-buildx-action@v4.4.1
-      - uses: docker/login-action@v4.6.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v7.4.0
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         id: build
         with:
           context: .
@@ -109,6 +132,11 @@ jobs:
             org.opencontainers.image.source=https://github.com/wanderson9/ts-egress
             org.opencontainers.image.version=${{ github.ref_name }}
             org.opencontainers.image.revision=${{ github.sha }}
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/wanderson9/ts-egress
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
 
   publish:
     needs: [binaries, image]
@@ -116,8 +144,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: actions/download-artifact@v8.0.2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-binaries
           path: release
@@ -129,7 +156,9 @@ jobs:
           cat > release-notes.md <<EOF
           ts-egress ${GITHUB_REF_NAME}
 
-          Standalone Linux binaries include the administration UI. Download the archive for your architecture and verify it against SHA256SUMS.
+          Standalone Linux binaries include the administration UI. Download the archive for your architecture and verify it against SHA256SUMS and its build attestation:
+
+          \`gh attestation verify ts-egress-${GITHUB_REF_NAME}-linux-amd64.tar.gz --repo ${GITHUB_REPOSITORY}\`
 
           Multi-architecture container (Linux amd64 and arm64):
           \`ghcr.io/wanderson9/ts-egress:${GITHUB_REF_NAME}\`
@@ -137,7 +166,10 @@ jobs:
           Immutable image reference:
           \`ghcr.io/wanderson9/ts-egress@${IMAGE_DIGEST}\`
 
+          Verify the container:
+          \`gh attestation verify oci://ghcr.io/wanderson9/ts-egress@${IMAGE_DIGEST} --repo ${GITHUB_REPOSITORY}\`
+
           See the README for loopback-only setup port publishing, persistent storage, and networking requirements.
           EOF
-          gh release upload "$GITHUB_REF_NAME" release/*
-          gh release edit "$GITHUB_REF_NAME" --notes-file release-notes.md --draft=false
+          gh release upload "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY"
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --notes-file release-notes.md --draft=false

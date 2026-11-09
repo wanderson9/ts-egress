@@ -115,7 +115,23 @@ func Load(path string) ([]Route, error) {
 	if err := json.Unmarshal(b, &routes); err != nil {
 		return nil, err
 	}
-	return routes, Validate(routes)
+	if err := Validate(routes); err != nil {
+		return routes, err
+	}
+	// Older releases could leave a plaintext password on disk. Replace it now:
+	// the proxy accepts only bcrypt verifiers.
+	for _, r := range routes {
+		if r.BasicAuthUser != "" && !strings.HasPrefix(r.BasicAuthPassword, "bcrypt:") {
+			if routes, err = PersistedRoutes(routes); err != nil {
+				return nil, err
+			}
+			if err := Save(path, routes); err != nil {
+				return nil, fmt.Errorf("migrate plaintext route credentials: %w", err)
+			}
+			break
+		}
+	}
+	return routes, nil
 }
 
 // Save replaces the configuration atomically; a failed write never changes live routing.

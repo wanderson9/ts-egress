@@ -25,7 +25,9 @@ smoke:
 	test "$$ready" = 1; \
 	curl --fail --silent "$$origin/api/setup/session" | grep -q '"claimed":false'; \
 	code=$$(curl --silent --output /dev/null --write-out '%{http_code}' "$$origin/api/setup/status"); test "$$code" = 401; \
-	code=$$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie-jar "$$cookie" --header 'Content-Type: application/json' --header "Origin: $$origin" --header 'X-TS-Egress: 1' --data '{"password":"smoke-test-password"}' "$$origin/api/setup/claim"); test "$$code" = 204; \
+	code=$$(curl --silent --output /dev/null --write-out '%{http_code}' --header 'Content-Type: application/json' --header "Origin: $$origin" --header 'X-TS-Egress: 1' --data '{"password":"smoke-test-password"}' "$$origin/api/setup/claim"); test "$$code" = 403; \
+	sleep 1; token=$$(docker logs "$$name" 2>&1 | sed -n 's/.*token=\([0-9a-f]*\).*/\1/p' | tail -n 1); test -n "$$token"; \
+	code=$$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie-jar "$$cookie" --header 'Content-Type: application/json' --header "Origin: $$origin" --header 'X-TS-Egress: 1' --data "{\"password\":\"smoke-test-password\",\"setupToken\":\"$$token\"}" "$$origin/api/setup/claim"); test "$$code" = 204; \
 	curl --fail --silent --cookie "$$cookie" "$$origin/api/setup/session" | grep -q '"authenticated":true'; \
 	code=$$(curl --silent --output /dev/null --write-out '%{http_code}' --cookie "$$cookie" "$$origin/api/setup/status"); test "$$code" = 200; \
 	public_port=$$(docker port "$$name" 80/tcp | sed 's/.*://'); code=$$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:$$public_port/api/routes"); test "$$code" = 404; \

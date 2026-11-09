@@ -145,6 +145,10 @@ export function ServiceEditor({
           <Field
             label={route?.basicAuth ? 'New password (leave blank to keep)' : 'Password'}
             type="password"
+            description="At least 12 bytes."
+            minLength={12}
+            maxLength={72}
+            autoComplete="new-password"
             value={authPassword}
             onChange={setAuthPassword}
           />

@@ -13,6 +13,7 @@ func TestInitialRegistrationEmailLocksAtConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	v.Email = "corrected@example.com"
+	v.Admins = []string{"me@example.com"}
 	v.Connect = true
 	if err := s.Update(v); err != nil {
 		t.Fatal(err)
